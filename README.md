@@ -1,1 +1,1 @@
-# Physics_informed_deep_learning_in_machining_equipment
+# Physics Informed Deep Learning In Machining Equipment (PINNs)
