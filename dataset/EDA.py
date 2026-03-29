@@ -97,6 +97,10 @@ def load_labels(data_dir: Path) -> pd.DataFrame:
             df[col] = df[col].str.replace(r"^MATWI[\\/]", "", regex=True)
             df[col] = df[col].str.replace(r"^(Set\d+)[\\/]", r"\1/\1/", regex=True)
 
+    # prints for debugging
+    # print(df["SensorFile"].dropna().iloc[0])
+    # print(df["ImageFile"].dropna().iloc[0])
+
     # Normalise wear-type labels to consistent lowercase+underscore form
     df["type"] = (df["type"].astype(str)
                             .str.strip()
@@ -533,7 +537,9 @@ def analyse_sensors(df: pd.DataFrame, data_dir: Path, out_dir: Path) -> None:
             sdf = load_one_sensor_file(fpath)
             if sdf is not None:
                 sdf["wear_at_capture"] = row["wear"]
-                sdf["label"] = f"ImageID={int(row['ImageID'])} | wear={row['wear']:.0f}µm"
+                img_id = int(row['ImageID']) if pd.notna(row['ImageID']) else "?"
+                wear_val = f"{row['wear']:.0f}" if pd.notna(row['wear']) else "?"
+                sdf["label"] = f"ImageID={img_id} | wear={wear_val}µm"
                 loaded_samples.append(sdf)
                 print(f"  Loaded: {fpath.name}  → {len(sdf)} rows")
         else:
@@ -577,10 +583,10 @@ def analyse_sensors(df: pd.DataFrame, data_dir: Path, out_dir: Path) -> None:
     subsection("Computing per-file sensor statistics (RMS, mean, std)")
 
     # Sample up to 30 sensor files spread across all sets for efficiency
-    sample_rows = (sensor_rows
-                   .groupby("Set", group_keys=False)
-                   .apply(lambda x: x.sample(min(len(x), 3), random_state=42))
-                   .reset_index(drop=True))
+    sample_rows = []
+    for set_num, group in sensor_rows.groupby("Set"):
+        sample_rows.append(group.sample(min(len(group), 3), random_state=42))
+    sample_rows = pd.concat(sample_rows, ignore_index=True)
 
     stats_records = []
     for _, row in sample_rows.iterrows():
@@ -898,7 +904,8 @@ def main() -> None:
     print("=" * 70)
 
     # Load
-    df      = load_labels(data_dir)
+    data_dir = resolve_data_dir(data_dir, "labels.csv")
+    df = load_labels(data_dir)
     sets_df = load_sets(data_dir)
 
     # Run all analyses
