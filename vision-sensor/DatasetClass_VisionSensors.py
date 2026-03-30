@@ -635,7 +635,7 @@ def build_multimodal_dataloaders(
     augment_strategy: Literal["uniform", "oversample_adhesion"] = "uniform",
     wear_cap:         Optional[float] = 450.0,
     impute_zero_wear: bool = False,
-    image_size:       tuple[int, int] = (224, 224),
+    image_size:       tuple[int, int] = (384, 384),
     batch_size:       int = 32,
     num_workers:      int = 4,
     scaler_save_path: Optional[str | Path] = None,

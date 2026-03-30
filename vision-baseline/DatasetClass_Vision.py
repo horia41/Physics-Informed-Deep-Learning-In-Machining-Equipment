@@ -155,7 +155,7 @@ class MATWIVisionDataset(Dataset):
         augment_strategy:   Literal["uniform", "oversample_adhesion"] = "uniform",
         wear_cap:           Optional[float] = 450.0,
         impute_zero_wear:   bool = False,
-        image_size:         tuple[int, int] = (224, 224),
+        image_size:         tuple[int, int] = (384, 384),
     ):
         super().__init__()
 
