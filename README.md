@@ -197,11 +197,15 @@ for batch in loaders["train"]:
 
 ### Experiments that need to be performed
 
-| ID      | Sets | Norm     | Augment | Modality   | wear_cap          | Purpose                                                                                                                                |
-|:--------|:-----|:---------|:--------|:-----------|:------------------|:---------------------------------------------------------------------------------------------------------------------------------------|
-| **E01** | 1–13 | imagenet | No      | Image only | 450 $\mu\text{m}$ | **Paper replica — direct comparison to ResNet50 baseline (MAE $\approx$ 30 $\mu\text{m}$ total)**<br>Goal: match paper numbers exactly |
-| **E02** | 1–13 | dataset  | No      | Image only | 450 $\mu\text{m}$ | **Same as E01 but with dataset-specific normalisation**<br>Goal: measure effect of normalisation choice                                |
-| **E03** | 1–13 | dataset  | Yes     | Image only | 450 $\mu\text{m}$ | **Add safe augmentations (flip, rotation, jitter, blur)**<br>Goal: measure effect of augmentation on 664 training images               |
-| **E04** | 1–13 | dataset  | Yes     | Image only | 450 $\mu\text{m}$ | **E03 + oversample adhesion $3\times$ via WeightedRandomSampler**<br>Goal: measure effect of adhesion oversampling on val adhesion MAE |
-| **E05** | 1–17 | dataset  | No      | Image only | 450 $\mu\text{m}$ | **Add sets 14–17 to training (444 extra samples, 166 flank+adhesion)**<br>Goal: measure effect of extra adhesion training data         |
-| **E06** | 1–17 | dataset  | Yes     | Image only | 450 $\mu\text{m}$ | **Sets 1–17 + augmentation — best Stage 1 configuration**<br>Goal: establish best vision-only ceiling before adding sensors            |
+1. Vision Only : Try replicating their ResNet50, trying to get as close as possible to their reported results ; then use our EfficientnetV2 to see how it compares to ResNet50
+2. Vision + Sensors : Adapt our EfficientnetV2 to take sensor inputs together with images, experiment with different fusion strategies and based on this we select the best one and proceed with next step
+3. Vision + Sensors + Taylor : Adapt our best model from 2. to use Taylor's Equation, see what happens
+4. Final Refinement
+
+| Model                                 |      Method      | Overall (µm) | Flank Wear (µm) | Adhesion (µm) | Flank Wear +Adhesion (µm) |
+|:--------------------------------------|:----------------:|:------------:|:---------------:|:-------------:|:-------------------------:|
+| Paper ResNet50                        |   Vision Only    |      30      |       14        |      39       |            91             |
+| Our ResNet50                          |   Vision Only    |              |                 |               |                           |
+| Our EfficientNetV2                    |   Vision Only    |              |                 |               |                           |
+| Our EfficientNetV2 + sensors          | Vision + Sensors |              |                 |               |                           |
+| Our EfficientNetV2 + sensors + Taylor | Vision + Sensors |              |                 |               |                           | 
