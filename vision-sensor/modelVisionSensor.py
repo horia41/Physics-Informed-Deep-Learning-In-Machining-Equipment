@@ -59,7 +59,7 @@ except ImportError:
     )
 
 # ── Constants ─────────────────────────────────────────────────────────────────
-BACKBONE_NAME   = "efficientnetv2_s"   # timm model name
+BACKBONE_NAME   = "tf_efficientnetv2_s.in21k_ft_in1k"   # timm model name
 BACKBONE_FEATDIM = 1280                # output dim after global avg pool
 N_SENSOR_FEATURES = 40                # from DatasetClass_VisionSensors
 
@@ -145,29 +145,21 @@ class RegressionHead(nn.Module):
 class LateFusionCombiner(nn.Module):
     """
     Learned combiner for late fusion.
-    Takes two scalar predictions (image branch + sensor branch) and
-    produces a single final prediction via a small MLP.
-
-    Architecture: 2 → 16 → 1 (no final activation)
+    Takes two scalar predictions and learns a weighted sum.
     """
+
     def __init__(self):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(2, 16),
-            nn.ReLU(inplace=True),
-            nn.Linear(16, 1),
-        )
-        # Initialise close to simple average so training starts stable
+        self.combiner = nn.Linear(2, 1)
+
+        # Initialize to act exactly like an average: 0.5 * pred_image + 0.5 * pred_sensor
         with torch.no_grad():
-            nn.init.kaiming_normal_(self.net[0].weight)
-            nn.init.zeros_(self.net[0].bias)
-            # Final layer: initialise close to equal weighting of both branches
-            self.net[2].weight.data.fill_(0.5)
-            nn.init.zeros_(self.net[2].bias)
+            self.combiner.weight.data.fill_(0.5)
+            nn.init.zeros_(self.combiner.bias)
 
     def forward(self, pred_image: torch.Tensor, pred_sensor: torch.Tensor) -> torch.Tensor:
-        x = torch.cat([pred_image, pred_sensor], dim=1)   # (B, 2)
-        return self.net(x)                                 # (B, 1)
+        x = torch.cat([pred_image, pred_sensor], dim=1)  # (B, 2)
+        return self.combiner(x)                                # (B, 1)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

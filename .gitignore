@@ -2,6 +2,7 @@ venv/
 #Data/
 dataset/matwi
 dataset/eda_output
+vision-sensor/runs_initial_train_adhesion3x
 .DS_Store
 __pycache__/
 *.pyc

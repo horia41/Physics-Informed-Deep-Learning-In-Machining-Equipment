@@ -170,36 +170,38 @@ def extract_sensor_features(sensor_path: Path) -> np.ndarray:
     for ch in SENSOR_CHANNELS:
         signal = df[ch].values.astype(np.float64)
 
-        # ── Time domain features ──────────────────────────────────────────
+        # ── Time domain features ──
         mean_val = float(np.mean(signal))
-        std_val  = float(np.std(signal))
-        rms_val  = float(np.sqrt(np.mean(signal ** 2)))
-        p2p_val  = float(np.max(signal) - np.min(signal))
+        std_val = float(np.std(signal))
+        rms_val = float(np.sqrt(np.mean(signal ** 2)))
+        p2p_val = float(np.max(signal) - np.min(signal))
         kurt_val = float(scipy_stats.kurtosis(signal, fisher=True))
         if not np.isfinite(kurt_val):
             kurt_val = 0.0
 
+        # ── Frequency domain features ──
+        # FIX: Remove DC offset before FFT so 0 Hz bin is ~0
+        signal_zero_mean = signal - mean_val
 
-        # ── Frequency domain features ─────────────────────────────────────
-        fft_mag   = np.abs(np.fft.rfft(signal))
+        fft_mag = np.abs(np.fft.rfft(signal_zero_mean))
         fft_power = fft_mag ** 2
 
         # Dominant frequency: frequency bin with highest magnitude
-        fft_mag_no_dc = fft_mag[1:]
+        fft_mag_no_dc = fft_mag[1:]  # Still safe to keep this
         if len(fft_mag_no_dc) == 0 or np.all(fft_mag_no_dc == 0):
             dom_freq = 0.0
         else:
             dom_freq = float(freqs[np.argmax(fft_mag_no_dc) + 1])
 
-        # Band energy: sum of power in frequency band
-        low_mask = freqs <= 200                          # 0–200 Hz
-        mid_mask = (freqs > 200) & (freqs <= 800)        # 200–800 Hz
+        # Band energy (now safe from DC offset artifact)
+        low_mask = freqs <= 200
+        mid_mask = (freqs > 200) & (freqs <= 800)
 
         low_energy = float(np.sum(fft_power[low_mask]))
         mid_energy = float(np.sum(fft_power[mid_mask]))
 
         features.extend([mean_val, std_val, rms_val, p2p_val, kurt_val,
-                          dom_freq, low_energy, mid_energy])
+                         dom_freq, low_energy, mid_energy])
 
     return np.array(features, dtype=np.float32)
 
@@ -411,15 +413,15 @@ class MATWIMultimodalDataset(Dataset):
             lambda s: "CK45" if s <= 11 else "RVS 304"
         )
 
-        # Restrict to active sets
-        df = df[df["Set"].isin(self.active_sets)].copy()
-
-        # Apply split filter
+        # Apply split filter FIRST, overriding active_sets if the split specifically demands it
         if self.split != "all":
             split_sets = SPLIT_SETS.get(self.split, [])
             if self.set_range == "1-17" and self.split == "train":
                 split_sets = SPLIT_SETS["train"] + SPLIT_SETS["unseen"]
             df = df[df["Set"].isin(split_sets)].copy()
+        else:
+            # Only restrict to active_sets if we are loading "all"
+            df = df[df["Set"].isin(self.active_sets)].copy()
 
         df = df.reset_index(drop=True)
         return df
