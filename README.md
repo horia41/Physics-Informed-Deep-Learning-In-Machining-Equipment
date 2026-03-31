@@ -202,10 +202,10 @@ for batch in loaders["train"]:
 3. Vision + Sensors + Taylor : Adapt our best model from 2. to use Taylor's Equation, see what happens
 4. Final Refinement
 
-| Model                                 |      Method      | Overall (µm) | Flank Wear (µm) | Adhesion (µm) | Flank Wear +Adhesion (µm) |
-|:--------------------------------------|:----------------:|:------------:|:---------------:|:-------------:|:-------------------------:|
-| Paper ResNet50                        |   Vision Only    |      30      |       14        |      39       |            91             |
-| Our ResNet50                          |   Vision Only    |              |                 |               |                           |
-| Our EfficientNetV2                    |   Vision Only    |              |                 |               |                           |
-| Our EfficientNetV2 + sensors          | Vision + Sensors |              |                 |               |                           |
-| Our EfficientNetV2 + sensors + Taylor | Vision + Sensors |              |                 |               |                           | 
+| Model                                   |      Method      | Overall (µm) | Flank Wear (µm) | Adhesion (µm) | Flank Wear +Adhesion (µm) |
+|:----------------------------------------|:----------------:|:------------:|:---------------:|:-------------:|:-------------------------:|
+| Paper ResNet50 (24M)                    |   Vision Only    |      30      |       14        |      39       |            91             |
+| Our ResNet50 (24M)                      |   Vision Only    |      42      |       36        |      54       |            62             |
+| Our EfficientNetV2-S (20.5M)            |   Vision Only    |      24      |       20        |      40       |            33             |
+| Our EfficientNetV2-S + sensors          | Vision + Sensors |              |                 |               |                           |
+| Our EfficientNetV2-S + sensors + Taylor | Vision + Sensors |              |                 |               |                           | 
