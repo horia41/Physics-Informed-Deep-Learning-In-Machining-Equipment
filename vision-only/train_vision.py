@@ -1,46 +1,40 @@
 """
-MATWI — Vision Baseline Training Script
-=========================================
-Produces the comparison ladder needed to validate the pipeline and
-quantify each component's contribution:
+MATWI — Vision Baseline Ablation Training Script
+==================================================
+Runs a grid of experiments to find which undocumented paper settings
+explain the gap between our ResNet50 replication (42 µm) and their
+reported result (30 µm).
 
-  Experiment 1  resnet50,        1-13, 224×224  →  paper replication
-  Experiment 2  efficientnetv2,  1-13, 384×384  →  backbone upgrade
+Ablation grid for ResNet50 paper replication (all use simple head, fixed LR):
+  1. resnet50_imagenet_L1   — our previous setup
+  2. resnet50_imagenet_MSE  — alternative loss
+  3. resnet50_dataset_L1    — alternative normalisation
+  4. resnet50_dataset_MSE   — alternative norm + loss
 
-Both use the paper's settings where known:
-  - LR 3e-4, 17 epochs, no augmentation, ImageNet normalisation
-  - L1 loss (MAE), AdamW optimiser
-  - Sets 1-13, paper train/val/test split
-  - wear_cap 450 µm, no zero-wear imputation
+Plus our EfficientNetV2 reference (mlp head, OneCycleLR):
+  5. efficientnetv2_imagenet_L1_mlp
 
-Expected result for Experiment 1:
-  Overall ~30 µm | Flank ~14 µm | Adhesion ~39 µm | F+A ~91 µm
-  (matching De Pauw et al. 2023, Table 3 — regression baseline)
+All experiments use:
+  - Sets 1-13, paper split, 664 training images
+  - No augmentation, no oversampling
+  - AdamW (wd=1e-4), batch_size=32, 17 epochs
+  - wear_cap=450, no zero-wear imputation, seed=42
 
-If Experiment 1 is far from these numbers, the pipeline has an issue
-that must be debugged before proceeding to sensor fusion or PINN.
-
-Outputs (under --output-dir/):
-  {experiment_name}/history.csv      — per-epoch train/val metrics
-  {experiment_name}/best_model.pt    — best checkpoint by val MAE
-  {experiment_name}/results.json     — final val/test MAE breakdown
-  comparison_summary.csv             — side-by-side comparison table
+Designed for SLURM (Snellius): use --only <name> to run one experiment per job.
 
 Usage:
-  python train_vision_baseline.py \\
-    --data-dir   ./data/matwi \\
-    --labels-csv ./data/matwi/labels.csv \\
-    --sets-csv   ./data/matwi/sets.csv \\
-    --output-dir ./runs/vision_baseline
+  # Run all 5 experiments sequentially:
+  python train_vision.py --data-dir ./data/matwi ...
 
-  # Run only the paper replication:
-  python train_vision_baseline.py ... --only resnet50_1-13
+  # Run a single experiment (for SLURM array jobs):
+  python train_vision.py --only resnet50_imagenet_L1 ...
 
-  # Run only EfficientNet:
-  python train_vision_baseline.py ... --only efficientnetv2_1-13
+  # List available experiment names:
+  python train_vision.py --list-experiments
 """
 
 from __future__ import annotations
+
 import argparse
 import json
 import math
@@ -48,7 +42,7 @@ import random
 import sys
 import time
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -58,7 +52,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
-# ── Local imports (resolve relative to this script) ──────────────────────────
+# ── Local imports ─────────────────────────────────────────────────────────────
 
 import importlib.util
 
@@ -82,11 +76,9 @@ def _load_module(name: str, candidates: list[Path]):
 
 _DS = _load_module("dataset_module", [
     _HERE / "DatasetClass_Vision.py",
-    _HERE / "DatasetClassVision.py",
 ])
 _MDL = _load_module("model_module", [
     _HERE / "ResNet_EfficientNet_Vision.py",
-    _HERE / "modelVision.py",
 ])
 
 MATWIVisionDataset = _DS.MATWIVisionDataset
@@ -100,9 +92,10 @@ WEAR_CAP    = 450.0
 WEAR_TYPES  = ["flank_wear", "adhesion", "flank_wear+adhesion"]
 
 
+# ── Experiment config ─────────────────────────────────────────────────────────
+
 @dataclass
 class ExperimentConfig:
-    """One row of the comparison ladder."""
     name:          str
     backbone:      str
     set_range:     str
@@ -110,30 +103,80 @@ class ExperimentConfig:
     epochs:        int
     lr:            float
     normalisation: str   = "imagenet"
+    loss:          str   = "L1"         # "L1" or "MSE"
+    head_type:     str   = "simple"     # "simple" or "mlp"
     augment:       bool  = False
     weight_decay:  float = 1e-4
     batch_size:    int   = 32
-    use_scheduler: bool = True
+    use_scheduler: bool  = False
 
 
-# The two key experiments
+# ── Experiment grid ───────────────────────────────────────────────────────────
+# ResNet50 ablations: 2 norms × 2 losses = 4, all simple head, fixed LR
+# EfficientNetV2: our best setup for reference
+
 DEFAULT_EXPERIMENTS = [
+    # ── ResNet50 paper replication ablations ──
     ExperimentConfig(
-        name       = "resnet50_1-13",
-        backbone   = "resnet50",
-        set_range  = "1-13",
-        image_size = (224, 224),
-        epochs     = 17,
-        lr         = 3e-4,
+        name          = "resnet50_imagenet_L1",
+        backbone      = "resnet50",
+        set_range     = "1-13",
+        image_size    = (224, 224),
+        epochs        = 17,
+        lr            = 3e-4,
+        normalisation = "imagenet",
+        loss          = "L1",
+        head_type     = "simple",
         use_scheduler = False,
     ),
     ExperimentConfig(
-        name       = "efficientnetv2_1-13",
-        backbone   = "efficientnetv2_s",
-        set_range  = "1-13",
-        image_size = (384, 384),
-        epochs     = 17,
-        lr         = 3e-4,
+        name          = "resnet50_imagenet_MSE",
+        backbone      = "resnet50",
+        set_range     = "1-13",
+        image_size    = (224, 224),
+        epochs        = 17,
+        lr            = 3e-4,
+        normalisation = "imagenet",
+        loss          = "MSE",
+        head_type     = "simple",
+        use_scheduler = False,
+    ),
+    ExperimentConfig(
+        name          = "resnet50_dataset_L1",
+        backbone      = "resnet50",
+        set_range     = "1-13",
+        image_size    = (224, 224),
+        epochs        = 17,
+        lr            = 3e-4,
+        normalisation = "dataset",
+        loss          = "L1",
+        head_type     = "simple",
+        use_scheduler = False,
+    ),
+    ExperimentConfig(
+        name          = "resnet50_dataset_MSE",
+        backbone      = "resnet50",
+        set_range     = "1-13",
+        image_size    = (224, 224),
+        epochs        = 17,
+        lr            = 3e-4,
+        normalisation = "dataset",
+        loss          = "MSE",
+        head_type     = "simple",
+        use_scheduler = False,
+    ),
+
+    # ── EfficientNetV2 reference (our best) ──
+    ExperimentConfig(
+        name          = "efficientnetv2_imagenet_L1_mlp",
+        backbone      = "efficientnetv2_s",
+        set_range     = "1-13",
+        image_size    = (384, 384),
+        epochs        = 17,
+        lr            = 3e-4,
+        normalisation = "imagenet",
+        loss          = "L1",
+        head_type     = "mlp",
         use_scheduler = True,
     ),
 ]
@@ -151,7 +194,6 @@ def set_seed(seed: int) -> None:
 
 
 def predictions_to_um(pred: torch.Tensor) -> torch.Tensor:
-    """Convert normalised predictions to µm, clamped to [0, WEAR_CAP]."""
     return (pred.squeeze(-1) * 1000.0).clamp(0.0, WEAR_CAP)
 
 
@@ -160,7 +202,6 @@ def compute_mae(
     target_um: np.ndarray,
     types:     list[str],
 ) -> dict[str, Any]:
-    """Compute overall and per-wear-type MAE in µm."""
     abs_err = np.abs(pred_um - target_um)
     out: dict[str, Any] = {
         "mae_overall_um": float(abs_err.mean()) if len(abs_err) else math.nan,
@@ -183,16 +224,24 @@ def fmt_metrics(m: dict[str, Any]) -> str:
     )
 
 
+def make_criterion(loss_name: str) -> nn.Module:
+    if loss_name == "L1":
+        return nn.L1Loss()
+    elif loss_name == "MSE":
+        return nn.MSELoss()
+    else:
+        raise ValueError(f"Unknown loss: {loss_name}. Use 'L1' or 'MSE'.")
+
+
 # ── Data ──────────────────────────────────────────────────────────────────────
 
 def build_loaders(
-    cfg:        ExperimentConfig,
-    data_dir:   Path,
-    labels_csv: Path,
-    sets_csv:   Path,
+    cfg:         ExperimentConfig,
+    data_dir:    Path,
+    labels_csv:  Path,
+    sets_csv:    Path,
     num_workers: int,
 ) -> dict[str, DataLoader]:
-    """Build train / val / test loaders.  Unseen only for 1-13."""
     common = dict(
         data_dir         = data_dir,
         labels_csv       = labels_csv,
@@ -204,7 +253,6 @@ def build_loaders(
         image_size       = cfg.image_size,
     )
 
-    # Training set
     train_ds = MATWIVisionDataset(**common, split="train", augment=cfg.augment)
     loaders = {
         "train": DataLoader(
@@ -217,7 +265,6 @@ def build_loaders(
         ),
     }
 
-    # Eval splits
     eval_splits = ["val", "test"]
     if cfg.set_range == "1-13":
         eval_splits.append("unseen")
@@ -225,7 +272,7 @@ def build_loaders(
     for split in eval_splits:
         ds = MATWIVisionDataset(**common, split=split, augment=False)
         if len(ds) == 0:
-            print(f"  [warn] split='{split}' is empty, skipping.")
+            print(f"  [warn] split='{split}' empty, skipping.")
             continue
         loaders[split] = DataLoader(
             ds,
@@ -338,8 +385,8 @@ def run_experiment(
 ) -> dict[str, Any]:
     print(f"\n{'='*80}")
     print(f"  EXPERIMENT: {cfg.name}")
-    print(f"  backbone={cfg.backbone}  set_range={cfg.set_range}  "
-          f"image={cfg.image_size}  epochs={cfg.epochs}  lr={cfg.lr}")
+    print(f"  backbone={cfg.backbone}  head={cfg.head_type}  norm={cfg.normalisation}  "
+          f"loss={cfg.loss}  lr={cfg.lr}  sched={cfg.use_scheduler}")
     print(f"{'='*80}")
 
     run_dir = output_dir / cfg.name
@@ -357,6 +404,7 @@ def run_experiment(
     # ── Model ─────────────────────────────────────────────────────────────────
     model = MATWIVisionModel(
         backbone         = cfg.backbone,
+        head_type        = cfg.head_type,
         pretrained       = not args.no_pretrained,
         head_hidden_dim  = args.head_hidden_dim,
         dropout_backbone = args.dropout_backbone,
@@ -372,22 +420,23 @@ def run_experiment(
 
     if cfg.use_scheduler:
         steps_per_epoch = len(loaders["train"])
-        total_steps = cfg.epochs * steps_per_epoch
+        total_steps     = cfg.epochs * steps_per_epoch
         scheduler = torch.optim.lr_scheduler.OneCycleLR(
             optimizer,
-            max_lr=cfg.lr,
-            total_steps=total_steps,
-            pct_start=0.3,
-            anneal_strategy="cos",
-            div_factor=25.0,
-            final_div_factor=1e4,
+            max_lr           = cfg.lr,
+            total_steps      = total_steps,
+            pct_start        = 0.3,
+            anneal_strategy  = "cos",
+            div_factor       = 25.0,
+            final_div_factor = 1e4,
         )
-        print(f"  Scheduler: OneCycleLR (max_lr={cfg.lr})")
+        print(f"  Scheduler: OneCycleLR")
     else:
         scheduler = None
         print(f"  Scheduler: None (fixed LR={cfg.lr})")
 
-    criterion = nn.L1Loss()
+    criterion = make_criterion(cfg.loss)
+    print(f"  Loss: {cfg.loss} → {criterion}")
 
     # ── Training loop ─────────────────────────────────────────────────────────
     history:     list[dict] = []
@@ -428,7 +477,6 @@ def run_experiment(
             "seconds":                        elapsed,
         })
 
-        # Checkpoint best
         if val_m["mae_overall_um"] < best_val_mae:
             best_val_mae = val_m["mae_overall_um"]
             best_epoch   = epoch
@@ -437,20 +485,16 @@ def run_experiment(
                 "epoch":            epoch,
                 "model_state_dict": best_state,
                 "val_mae_um":       best_val_mae,
-                "backbone":         cfg.backbone,
-                "set_range":        cfg.set_range,
-                "image_size":       cfg.image_size,
+                "config":           cfg.__dict__,
             }, run_dir / "best_model.pt")
             print(f"    ✓ new best val_mae={best_val_mae:.2f}µm")
 
-    # ── Save history ──────────────────────────────────────────────────────────
     pd.DataFrame(history).to_csv(run_dir / "history.csv", index=False)
 
-    # ── Final evaluation with best model ──────────────────────────────────────
+    # ── Final evaluation ──────────────────────────────────────────────────────
     if best_state is not None:
         model.load_state_dict(best_state)
-        print(f"\n  Restored best model (epoch {best_epoch}, "
-              f"val={best_val_mae:.2f}µm)")
+        print(f"\n  Restored best model (epoch {best_epoch}, val={best_val_mae:.2f}µm)")
 
     print(f"\n  --- Final results: {cfg.name} ---")
     final_results: dict[str, dict] = {}
@@ -459,15 +503,10 @@ def run_experiment(
         final_results[split] = m
         print(f"  [{split:7s}] {fmt_metrics(m)}")
 
-    # ── Save results JSON ─────────────────────────────────────────────────────
     with open(run_dir / "results.json", "w") as fh:
         json.dump({
             "experiment":      cfg.name,
-            "backbone":        cfg.backbone,
-            "set_range":       cfg.set_range,
-            "image_size":      list(cfg.image_size),
-            "epochs":          cfg.epochs,
-            "lr":              cfg.lr,
+            "config":          cfg.__dict__,
             "best_epoch":      best_epoch,
             "best_val_mae_um": best_val_mae,
             "splits": {
@@ -479,8 +518,7 @@ def run_experiment(
 
     return {
         "name":            cfg.name,
-        "backbone":        cfg.backbone,
-        "set_range":       cfg.set_range,
+        "config":          cfg.__dict__,
         "best_epoch":      best_epoch,
         "best_val_mae_um": best_val_mae,
         "final_results":   final_results,
@@ -490,14 +528,17 @@ def run_experiment(
 # ── Comparison summary ────────────────────────────────────────────────────────
 
 def write_comparison(results: list[dict], output_dir: Path) -> None:
-    """Write a CSV + printed table comparing all experiments."""
     rows = []
     for res in results:
+        cfg = res["config"]
         for split, m in res["final_results"].items():
             rows.append({
                 "experiment":                  res["name"],
-                "backbone":                    res["backbone"],
-                "set_range":                   res["set_range"],
+                "backbone":                    cfg["backbone"],
+                "head_type":                   cfg["head_type"],
+                "normalisation":               cfg["normalisation"],
+                "loss":                        cfg["loss"],
+                "scheduler":                   cfg["use_scheduler"],
                 "eval_split":                  split,
                 "best_epoch":                  res["best_epoch"],
                 "best_val_mae_um":             res["best_val_mae_um"],
@@ -508,19 +549,14 @@ def write_comparison(results: list[dict], output_dir: Path) -> None:
                 "n_total":                     m["n_total"],
             })
 
-    # Add paper reference row for context
+    # Paper reference
     rows.append({
-        "experiment":                  "paper_regression_baseline",
-        "backbone":                    "resnet50",
-        "set_range":                   "1-13",
-        "eval_split":                  "test",
-        "best_epoch":                  "—",
-        "best_val_mae_um":             "—",
-        "mae_overall_um":              30.0,
-        "mae_flank_wear_um":           14.0,
-        "mae_adhesion_um":             39.0,
-        "mae_flank_wear+adhesion_um":  91.0,
-        "n_total":                     "—",
+        "experiment": "paper_baseline", "backbone": "resnet50",
+        "head_type": "simple", "normalisation": "?", "loss": "?",
+        "scheduler": False, "eval_split": "test", "best_epoch": "—",
+        "best_val_mae_um": "—", "mae_overall_um": 30.0,
+        "mae_flank_wear_um": 14.0, "mae_adhesion_um": 39.0,
+        "mae_flank_wear+adhesion_um": 91.0, "n_total": "—",
     })
 
     df = pd.DataFrame(rows)
@@ -528,17 +564,19 @@ def write_comparison(results: list[dict], output_dir: Path) -> None:
     df.to_csv(path, index=False)
 
     print(f"\n{'='*90}")
-    print("  COMPARISON SUMMARY  (paper reference included for context)")
+    print("  COMPARISON SUMMARY")
     print(f"{'='*90}")
-    print(df.to_string(index=False))
-    print(f"\n  Saved → {path}")
+    # Show test results only for a clean overview
+    test_df = df[df["eval_split"] == "test"]
+    print(test_df.to_string(index=False))
+    print(f"\n  Full results (all splits) → {path}")
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        description="MATWI vision baseline: ResNet50 (paper) vs EfficientNetV2 (ours)."
+        description="MATWI vision baseline ablation: head/norm/loss grid."
     )
     p.add_argument("--data-dir",    type=Path, required=True)
     p.add_argument("--labels-csv",  type=Path, required=True)
@@ -546,13 +584,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--output-dir",  type=Path, required=True)
 
     p.add_argument("--only", type=str, default=None,
-                   help="Run only one experiment by name, e.g. 'resnet50_1-13'")
-    p.add_argument("--epochs",    type=int,   default=None,
-                   help="Override epoch count for all experiments.")
-    p.add_argument("--lr",        type=float, default=None,
-                   help="Override learning rate for all experiments.")
-    p.add_argument("--batch-size", type=int,  default=None,
-                   help="Override batch size for all experiments.")
+                   help="Run only one experiment by name.")
+    p.add_argument("--list-experiments", action="store_true",
+                   help="Print available experiment names and exit.")
 
     p.add_argument("--num-workers",      type=int,   default=4)
     p.add_argument("--seed",             type=int,   default=42)
@@ -562,8 +596,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--head-hidden-dim",  type=int,   default=256)
     p.add_argument("--dropout-backbone", type=float, default=0.3)
     p.add_argument("--dropout-head",     type=float, default=0.4)
-    p.add_argument("--log-every",        type=int,   default=0,
-                   help="Print step-level logs every N steps (0 = epoch only)")
+    p.add_argument("--log-every",        type=int,   default=0)
     return p
 
 
@@ -578,25 +611,25 @@ def resolve_device(choice: str) -> torch.device:
 
 
 def main() -> None:
-    args       = build_parser().parse_args()
+    args = build_parser().parse_args()
+
+    if args.list_experiments:
+        print("Available experiments:")
+        for cfg in DEFAULT_EXPERIMENTS:
+            print(f"  {cfg.name:40s}  backbone={cfg.backbone}  head={cfg.head_type}  "
+                  f"norm={cfg.normalisation}  loss={cfg.loss}  sched={cfg.use_scheduler}")
+        sys.exit(0)
+
     output_dir = args.output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
     set_seed(args.seed)
     device = resolve_device(args.device)
 
-    # ── Build experiment list ─────────────────────────────────────────────────
     experiments = []
     for cfg in DEFAULT_EXPERIMENTS:
         if args.only and cfg.name != args.only:
             continue
-        # Apply CLI overrides
-        if args.epochs is not None:
-            cfg.epochs = args.epochs
-        if args.lr is not None:
-            cfg.lr = args.lr
-        if args.batch_size is not None:
-            cfg.batch_size = args.batch_size
         experiments.append(cfg)
 
     if not experiments:
@@ -608,16 +641,13 @@ def main() -> None:
     print(f"Device       : {device}")
     print(f"Experiments  : {[c.name for c in experiments]}")
     print(f"Output dir   : {output_dir}")
-    print(f"Seed         : {args.seed}")
 
-    # ── Run experiments ───────────────────────────────────────────────────────
     all_results = []
     for cfg in experiments:
-        set_seed(args.seed)   # reset seed for each experiment for reproducibility
+        set_seed(args.seed)
         result = run_experiment(cfg, args, device, output_dir)
         all_results.append(result)
 
-    # ── Comparison ────────────────────────────────────────────────────────────
     write_comparison(all_results, output_dir)
 
 
