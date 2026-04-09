@@ -1,27 +1,33 @@
 """
-MATWI — Vision + Sensor Dataset Class
-=======================================
+MATWI — Vision + Sensor Dataset Class (v2)
+============================================
 Handles image loading, cropping, normalisation, sensor feature extraction,
-and sensor feature standardisation for Stage 2+ (multimodal fusion).
+sensor feature standardisation, and feature set selection for Stage 2+.
+
+Changes from v1:
+  - Added feature_set parameter ("all40", "top25", "raw25") for controlled
+    sensor feature ablation
+  - Fixed type_map: added "flank_wear+adhesive_wear" → "flank_wear+adhesion"
+  - Added FEATURE_SETS constant with precomputed index arrays
+  - Added n_selected_features property
 
 Sensor feature engineering (per milling pass CSV):
   For each of the 5 channels (acc, acoustic, Fx, Fy, Fz):
-    - mean, std, rms, peak-to-peak (p2p), kurtosis       → 5 × 5 = 25 features
-    - dominant FFT frequency, FFT energy in 3 bands       → 5 × 3 = 15 features
+    Time domain (5):  mean, std, rms, peak-to-peak, kurtosis
+    Freq domain (3):  dominant FFT frequency, low-band energy, mid-band energy
   Total: 40 features per sample
 
-  Note on Force Z: non-zero despite paper's claim (mean≈-2.32, std≈2.09).
-  It is included but zero-mean normalised with the rest — not dropped.
+Feature sets:
+  "all40"  — all 40 features (time + frequency domain)
+  "raw25"  — 25 time-domain features only (no FFT engineering)
+  "top25"  — top 25 features by Ridge regression importance (mix of time + freq)
 
 Sensor standardisation:
-  Features have wildly different scales (dom_freq ≈ hundreds vs mean_acc ≈ 0).
-  Standardisation (zero mean, unit std) is computed over the TRAINING SET ONLY
-  and applied to val/test/unseen. The scaler is saved and reusable.
-
-Supports same flags as MATWIVisionDataset plus sensor-specific options.
+  Features are standardised (zero mean, unit std) computed on TRAINING SET ONLY.
+  Scaler fits on all 40 features; subset selection happens at return time.
 
 Usage:
-    from DatasetClass_VisionSensors import MATWIMultimodalDataset
+    from DatasetClass_VisionSensors import MATWIMultimodalDataset, FEATURE_SETS
 
     train_ds = MATWIMultimodalDataset(
         data_dir        = "./data/matwi",
@@ -32,10 +38,10 @@ Usage:
         normalisation   = "dataset",
         augment         = False,
         wear_cap        = 450.0,
-        impute_zero_wear= False,
-        sensor_scaler   = None,   # fit scaler on train, pass to val/test
+        feature_set     = "all40",
+        sensor_scaler   = None,
     )
-    scaler = train_ds.fit_sensor_scaler()   # fit and store
+    scaler = train_ds.fit_sensor_scaler()
 
     val_ds = MATWIMultimodalDataset(..., split="val", sensor_scaler=scaler)
 """
@@ -56,7 +62,9 @@ import torchvision.transforms as T
 
 warnings.filterwarnings("ignore")
 
+
 # ── Reuse constants from vision class ─────────────────────────────────────────
+
 SPLIT_SETS = {
     "train":  [1, 2, 5, 7, 8, 10, 11],
     "val":    [3, 6, 12],
@@ -113,6 +121,50 @@ N_SENSOR_FEATURES = len(SENSOR_CHANNELS) * 8  # 5 channels × 8 features = 40
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Feature set definitions
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# Extraction order per channel (8 features):
+#   [mean, std, rms, p2p, kurtosis, dom_freq, low_energy, mid_energy]
+#
+# Channel layout (5 channels × 8 = 40 features):
+#   acc:      indices  0– 7   (mean=0,  std=1,  rms=2,  p2p=3,  kurt=4,  dom=5,  low=6,  mid=7)
+#   acoustic: indices  8–15   (mean=8,  std=9,  rms=10, p2p=11, kurt=12, dom=13, low=14, mid=15)
+#   Fx:       indices 16–23   (mean=16, std=17, rms=18, p2p=19, kurt=20, dom=21, low=22, mid=23)
+#   Fy:       indices 24–31   (mean=24, std=25, rms=26, p2p=27, kurt=28, dom=29, low=30, mid=31)
+#   Fz:       indices 32–39   (mean=32, std=33, rms=34, p2p=35, kurt=36, dom=37, low=38, mid=39)
+#
+
+FEATURE_SETS = {
+    # All 40 engineered features (time + frequency domain)
+    "all40": list(range(40)),
+
+    # 25 time-domain features only — no FFT/spectral engineering
+    # First 5 features of each 8-feature block (mean, std, rms, p2p, kurtosis)
+    "raw25": [
+        0,  1,  2,  3,  4,     # acc:      mean, std, rms, p2p, kurtosis
+        8,  9,  10, 11, 12,    # acoustic: mean, std, rms, p2p, kurtosis
+        16, 17, 18, 19, 20,    # Fx:       mean, std, rms, p2p, kurtosis
+        24, 25, 26, 27, 28,    # Fy:       mean, std, rms, p2p, kurtosis
+        32, 33, 34, 35, 36,    # Fz:       mean, std, rms, p2p, kurtosis
+    ],
+
+    # Top 25 features by Ridge regression |coefficient| from sensor sanity check.
+    # Drops all 5 dom_freq features (consistently weakest), all 5 kurtosis
+    # features, and 5 additional weak features: acc_mean, acc_low_energy,
+    # Fz_mean, Fz_p2p, acoustic_mean.
+    # This is a mix of time-domain and frequency-domain features.
+    "top25": [
+        1,  2,  3,  7,             # acc:      std, rms, p2p, mid_energy
+        9,  10, 11, 14, 15,        # acoustic: std, rms, p2p, low_energy, mid_energy
+        16, 17, 18, 19, 22, 23,    # Fx:       mean, std, rms, p2p, low_energy, mid_energy
+        24, 25, 26, 27, 30, 31,    # Fy:       mean, std, rms, p2p, low_energy, mid_energy
+        33, 34, 38, 39,            # Fz:       std, rms, low_energy, mid_energy
+    ],
+}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Sensor feature engineering
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -135,13 +187,6 @@ def extract_sensor_features(sensor_path: Path) -> np.ndarray:
             dominant frequency (Hz), low-band energy (0–200 Hz),
             mid-band energy (200–800 Hz)
 
-    Note on Force Z:
-        Non-zero in practice (mean≈-2.32, std≈2.09 across dataset).
-        Included as-is — standardisation will handle the offset.
-        The physical interpretation is unclear (possible sensor offset or
-        Z-direction vibration); it is retained rather than dropped since
-        it may still carry useful variance.
-
     Returns
     -------
     np.ndarray of shape (40,), dtype float32.
@@ -151,7 +196,7 @@ def extract_sensor_features(sensor_path: Path) -> np.ndarray:
         df = pd.read_csv(
             sensor_path,
             header=None,
-            usecols=[0, 1, 2, 3, 4],   # skip datetime column
+            usecols=[0, 1, 2, 3, 4],
             dtype=np.float32,
             low_memory=False,
         )
@@ -163,40 +208,37 @@ def extract_sensor_features(sensor_path: Path) -> np.ndarray:
     features = []
     n = len(df)
 
-    # Pre-compute FFT once per channel (shared across features)
-    # Use Welch-style: take FFT of the full signal, compute magnitude spectrum
-    freqs = np.fft.rfftfreq(n, d=1.0 / SENSOR_FS)  # frequency bins in Hz
+    # Pre-compute FFT frequency bins (shared across channels)
+    freqs = np.fft.rfftfreq(n, d=1.0 / SENSOR_FS)
 
     for ch in SENSOR_CHANNELS:
         signal = df[ch].values.astype(np.float64)
 
         # ── Time domain features ──
         mean_val = float(np.mean(signal))
-        std_val = float(np.std(signal))
-        rms_val = float(np.sqrt(np.mean(signal ** 2)))
-        p2p_val = float(np.max(signal) - np.min(signal))
+        std_val  = float(np.std(signal))
+        rms_val  = float(np.sqrt(np.mean(signal ** 2)))
+        p2p_val  = float(np.max(signal) - np.min(signal))
         kurt_val = float(scipy_stats.kurtosis(signal, fisher=True))
         if not np.isfinite(kurt_val):
             kurt_val = 0.0
 
         # ── Frequency domain features ──
-        # FIX: Remove DC offset before FFT so 0 Hz bin is ~0
+        # Remove DC offset before FFT so 0 Hz bin is ~0
         signal_zero_mean = signal - mean_val
-
-        fft_mag = np.abs(np.fft.rfft(signal_zero_mean))
+        fft_mag   = np.abs(np.fft.rfft(signal_zero_mean))
         fft_power = fft_mag ** 2
 
-        # Dominant frequency: frequency bin with highest magnitude
-        fft_mag_no_dc = fft_mag[1:]  # Still safe to keep this
+        # Dominant frequency: bin with highest magnitude (excluding DC)
+        fft_mag_no_dc = fft_mag[1:]
         if len(fft_mag_no_dc) == 0 or np.all(fft_mag_no_dc == 0):
             dom_freq = 0.0
         else:
             dom_freq = float(freqs[np.argmax(fft_mag_no_dc) + 1])
 
-        # Band energy (now safe from DC offset artifact)
+        # Band energy
         low_mask = freqs <= 200
         mid_mask = (freqs > 200) & (freqs <= 800)
-
         low_energy = float(np.sum(fft_power[low_mask]))
         mid_energy = float(np.sum(fft_power[mid_mask]))
 
@@ -215,12 +257,10 @@ class SensorScaler:
     Simple zero-mean, unit-std standardiser for sensor feature vectors.
     Fit on training data only, applied to all splits.
 
-    Usage:
-        scaler = SensorScaler()
-        scaler.fit(train_features)          # np.ndarray (N, 40)
-        scaled = scaler.transform(features) # np.ndarray (N, 40)
-        scaler.save("sensor_scaler.pkl")
-        scaler = SensorScaler.load("sensor_scaler.pkl")
+    Always fits on all 40 features. Feature subset selection (raw25, top25)
+    happens downstream — since standardisation is per-feature, selecting
+    25 columns from a 40-feature scaler gives identical results to fitting
+    a 25-feature scaler on those 25 columns.
     """
 
     def __init__(self):
@@ -230,13 +270,11 @@ class SensorScaler:
 
     def fit(self, features: np.ndarray) -> "SensorScaler":
         """features: (N, 40) array of raw sensor features from training set."""
-        self.mean_  = features.mean(axis=0)
-        self.std_   = features.std(axis=0)
+        self.mean_ = features.mean(axis=0)
+        self.std_  = features.std(axis=0)
         # Avoid division by zero for constant features
         self.mean_ = np.nan_to_num(self.mean_, nan=0.0)
-        self.std_ = np.nan_to_num(self.std_, nan=1.0)
-        self.mean_ = np.nan_to_num(self.mean_, nan=0.0)
-        self.std_ = np.nan_to_num(self.std_, nan=1.0)
+        self.std_  = np.nan_to_num(self.std_, nan=1.0)
         self.std_[self.std_ < 1e-8] = 1.0
         self.fitted = True
         return self
@@ -280,21 +318,25 @@ class MATWIMultimodalDataset(Dataset):
     """
     PyTorch Dataset for MATWI — vision + sensor mode (Stage 2+).
 
-    Only samples with BOTH image and sensor data available are included
-    (i.e. rows where has_image=True AND has_sensor=True).
+    Only samples with BOTH image and sensor data available are included.
+    This gives 647 train / 300 val / 247 test for sets 1-13.
 
     Parameters
     ----------
+    feature_set : "all40" | "top25" | "raw25"
+        Which sensor features to return.
+        - "all40": full 40-feature vector (time + frequency domain)
+        - "top25": top 25 features by Ridge importance
+        - "raw25": 25 time-domain features only (no FFT engineering)
+        Feature extraction always produces all 40; selection happens at
+        return time. Scaler is fit on all 40.
+
     sensor_scaler : SensorScaler or None
         Pre-fitted SensorScaler to standardise sensor features.
-        - For the training split: pass None, then call fit_sensor_scaler()
-          after construction to fit on training data and get the scaler.
+        - For training split: pass None, then call fit_sensor_scaler()
         - For val/test splits: pass the scaler fitted on training data.
-        - If None and split != "train": a warning is raised and raw
-          (unstandardised) features are returned.
 
-    All other parameters are identical to MATWIVisionDataset.
-    See that class for full documentation.
+    All other parameters identical to MATWIVisionDataset.
     """
 
     def __init__(
@@ -309,7 +351,8 @@ class MATWIMultimodalDataset(Dataset):
         augment_strategy:   Literal["uniform", "oversample_adhesion"] = "uniform",
         wear_cap:           Optional[float] = 450.0,
         impute_zero_wear:   bool = False,
-        image_size:         tuple[int, int] = (224, 224),
+        image_size:         tuple[int, int] = (384, 384),
+        feature_set:        Literal["all40", "top25", "raw25"] = "all40",
         sensor_scaler:      Optional[SensorScaler] = None,
     ):
         super().__init__()
@@ -323,7 +366,16 @@ class MATWIMultimodalDataset(Dataset):
         self.wear_cap         = wear_cap
         self.impute_zero_wear = impute_zero_wear
         self.image_size       = image_size
+        self.feature_set      = feature_set
         self.sensor_scaler    = sensor_scaler
+
+        # Validate feature_set
+        if feature_set not in FEATURE_SETS:
+            raise ValueError(
+                f"feature_set must be one of {list(FEATURE_SETS.keys())}, "
+                f"got '{feature_set}'"
+            )
+        self._feature_indices = np.array(FEATURE_SETS[feature_set])
 
         if sensor_scaler is None and split not in ("train", "all"):
             warnings.warn(
@@ -348,13 +400,23 @@ class MATWIMultimodalDataset(Dataset):
         self.transform     = self._build_transform(norm_stats, augment=self.augment)
         self.transform_val = self._build_transform(norm_stats, augment=False)
 
-        # Sensor feature cache: filled lazily on first access
+        # Sensor feature cache: stores full 40-dim standardised features
+        # Feature subset selection happens in __getitem__
         self._sensor_cache: dict[int, np.ndarray] = {}
 
         print(f"[MATWIMultimodalDataset] split={split} | set_range={set_range} | "
               f"norm={normalisation} | augment={self.augment} | "
               f"n_samples={len(self.df)} | "
-              f"wear_cap={wear_cap}µm | scaler={'fitted' if sensor_scaler else 'None'}")
+              f"wear_cap={wear_cap}µm | feature_set={feature_set} "
+              f"({self.n_selected_features} features) | "
+              f"scaler={'fitted' if sensor_scaler else 'None'}")
+
+    # ── Properties ────────────────────────────────────────────────────────────
+
+    @property
+    def n_selected_features(self) -> int:
+        """Number of sensor features returned by __getitem__."""
+        return len(self._feature_indices)
 
     # ── Data loading ──────────────────────────────────────────────────────────
 
@@ -374,15 +436,15 @@ class MATWIMultimodalDataset(Dataset):
                                 .str.lower()
                                 .str.replace(" ", "_"))
         type_map = {
-            "adhesive":                 "adhesion",
-            "adhesive_wear":            "adhesion",
-            "flank":                    "flank_wear",
-            "flank_wear_and_adhesion":  "flank_wear+adhesion",
-            "flank_wear_&_adhesion":    "flank_wear+adhesion",
-            "combination":              "flank_wear+adhesion",
+            "adhesive":                  "adhesion",
+            "adhesive_wear":             "adhesion",
+            "flank":                     "flank_wear",
+            "flank_wear_and_adhesion":   "flank_wear+adhesion",
+            "flank_wear_&_adhesion":     "flank_wear+adhesion",
+            "flank_wear+adhesive_wear":  "flank_wear+adhesion",   # ← FIXED: was missing in v1
+            "combination":               "flank_wear+adhesion",
         }
         df["type"] = df["type"].replace(type_map)
-        # print(df["type"].value_counts(dropna=False))
 
         # Numeric coercions
         df["wear"]     = pd.to_numeric(df["wear"],     errors="coerce")
@@ -390,7 +452,7 @@ class MATWIMultimodalDataset(Dataset):
         df["ImageID"]  = pd.to_numeric(df["ImageID"],  errors="coerce")
         df["SensorID"] = pd.to_numeric(df["SensorID"], errors="coerce")
 
-        # ── Stage 2 key requirement: keep only rows with BOTH modalities ──
+        # ── Keep only rows with BOTH modalities ──
         has_image  = df["ImageName"].notna()  & df["ImageID"].notna()
         has_sensor = df["SensorName"].notna() & df["SensorID"].notna()
         df = df[has_image & has_sensor].copy()
@@ -413,14 +475,13 @@ class MATWIMultimodalDataset(Dataset):
             lambda s: "CK45" if s <= 11 else "RVS 304"
         )
 
-        # Apply split filter FIRST, overriding active_sets if the split specifically demands it
+        # Apply split filter
         if self.split != "all":
             split_sets = SPLIT_SETS.get(self.split, [])
             if self.set_range == "1-17" and self.split == "train":
                 split_sets = SPLIT_SETS["train"] + SPLIT_SETS["unseen"]
             df = df[df["Set"].isin(split_sets)].copy()
         else:
-            # Only restrict to active_sets if we are loading "all"
             df = df[df["Set"].isin(self.active_sets)].copy()
 
         df = df.reset_index(drop=True)
@@ -469,6 +530,9 @@ class MATWIMultimodalDataset(Dataset):
         """
         Load sensor file, extract 40 features, apply standardisation if
         scaler is available. Results are cached in memory after first load.
+
+        Returns the full 40-dim standardised vector. Feature subset selection
+        happens in __getitem__.
         """
         if idx in self._sensor_cache:
             return self._sensor_cache[idx]
@@ -494,16 +558,17 @@ class MATWIMultimodalDataset(Dataset):
     def __getitem__(self, idx: int) -> dict:
         row = self.df.iloc[idx]
 
-        image          = self._load_image(idx)
+        image           = self._load_image(idx)
+        full_features   = self._load_sensor_features(idx)         # (40,)
         sensor_features = torch.tensor(
-            self._load_sensor_features(idx), dtype=torch.float32
-        )
+            full_features[self._feature_indices], dtype=torch.float32
+        )                                                          # (n_selected,)
         wear     = torch.tensor(row["wear_norm"], dtype=torch.float32)
         wear_raw = torch.tensor(row["wear"],      dtype=torch.float32)
 
         return {
             "image":           image,            # (3, H, W) float32
-            "sensor_features": sensor_features,  # (40,) float32
+            "sensor_features": sensor_features,  # (n_selected,) float32
             "wear":            wear,              # scalar, normalised [0,1]
             "wear_raw":        wear_raw,          # scalar, µm
             "set":             int(row["Set"]),
@@ -523,19 +588,11 @@ class MATWIMultimodalDataset(Dataset):
         Extract sensor features for all training samples, fit a SensorScaler,
         attach it to this dataset, and optionally save it to disk.
 
+        Always fits on all 40 features regardless of feature_set setting.
+        Feature subset selection happens at __getitem__ return time.
+
         Call this ONLY on the training split. Then pass the returned scaler
-        to the val and test dataset constructors via sensor_scaler=scaler.
-
-        Parameters
-        ----------
-        save_path : str or Path, optional
-            If provided, saves the fitted scaler to this path as a .pkl file.
-        verbose : bool
-            Print progress and feature statistics.
-
-        Returns
-        -------
-        SensorScaler fitted on this dataset's samples.
+        to val/test dataset constructors via sensor_scaler=scaler.
         """
         if self.split not in ("train", "all"):
             warnings.warn(
@@ -545,7 +602,8 @@ class MATWIMultimodalDataset(Dataset):
             )
 
         if verbose:
-            print(f"[fit_sensor_scaler] Extracting features for {len(self.df)} samples...")
+            print(f"[fit_sensor_scaler] Extracting features for "
+                  f"{len(self.df)} samples...")
 
         all_features = []
         for i in range(len(self.df)):
@@ -562,14 +620,14 @@ class MATWIMultimodalDataset(Dataset):
         scaler.fit(all_features)
 
         if verbose:
-            print(f"[fit_sensor_scaler] Done. Feature stats after standardisation:")
             scaled = scaler.transform(all_features)
+            print(f"[fit_sensor_scaler] Done. Feature stats after standardisation:")
             print(f"  mean range : [{scaled.mean(axis=0).min():.4f}, "
                   f"{scaled.mean(axis=0).max():.4f}]  (should be ~0)")
             print(f"  std  range : [{scaled.std(axis=0).min():.4f}, "
                   f"{scaled.std(axis=0).max():.4f}]  (should be ~1)")
 
-        # Populate cache with standardised features
+        # Populate cache with standardised features (full 40-dim)
         for i, features in enumerate(all_features):
             self._sensor_cache[i] = scaler.transform(features.reshape(1, -1))[0]
 
@@ -587,7 +645,9 @@ class MATWIMultimodalDataset(Dataset):
         for _, row in self.df.iterrows():
             weights.append(3.0 if row["type"] in ADHESION_TYPES else 1.0)
         weights = torch.tensor(weights, dtype=torch.float32)
-        return WeightedRandomSampler(weights, num_samples=len(weights), replacement=True)
+        return WeightedRandomSampler(
+            weights, num_samples=len(weights), replacement=True
+        )
 
     def get_wear_stats(self) -> dict:
         wear = self.df["wear"]
@@ -604,13 +664,13 @@ class MATWIMultimodalDataset(Dataset):
         return self.df["type"].value_counts().to_dict()
 
     def get_feature_names(self) -> list[str]:
-        """Returns the 40 feature names in order."""
-        names = []
+        """Returns feature names for the selected feature_set."""
+        all_names = []
         for ch in SENSOR_CHANNELS:
             for feat in ["mean", "std", "rms", "p2p", "kurtosis",
-                         "dom_freq", "low_band_energy", "mid_band_energy"]:
-                names.append(f"{ch}_{feat}")
-        return names
+                         "dom_freq", "low_energy", "mid_energy"]:
+                all_names.append(f"{ch}_{feat}")
+        return [all_names[i] for i in self._feature_indices]
 
     def __repr__(self) -> str:
         stats = self.get_wear_stats()
@@ -621,6 +681,7 @@ class MATWIMultimodalDataset(Dataset):
             f"wear_mean={stats['mean']:.1f}µm, "
             f"wear_range=[{stats['min']:.0f}, {stats['max']:.0f}]µm, "
             f"norm={self.normalisation}, augment={self.augment}, "
+            f"feature_set={self.feature_set} ({self.n_selected_features}), "
             f"scaler={'fitted' if self.sensor_scaler else 'None'})"
         )
 
@@ -638,6 +699,7 @@ def build_multimodal_dataloaders(
     wear_cap:         Optional[float] = 450.0,
     impute_zero_wear: bool = False,
     image_size:       tuple[int, int] = (384, 384),
+    feature_set:      Literal["all40", "top25", "raw25"] = "all40",
     batch_size:       int = 32,
     num_workers:      int = 4,
     scaler_save_path: Optional[str | Path] = None,
@@ -649,19 +711,7 @@ def build_multimodal_dataloaders(
     Returns
     -------
     loaders : dict with keys "train", "val", "test" (and "unseen" if 1-17)
-    scaler  : fitted SensorScaler (save and reuse for inference)
-
-    Example:
-        loaders, scaler = build_multimodal_dataloaders(
-            data_dir   = "./data/matwi",
-            labels_csv = "./data/matwi/labels.csv",
-            sets_csv   = "./data/matwi/sets.csv",
-            set_range  = "1-13",
-        )
-        for batch in loaders["train"]:
-            images   = batch["image"]            # (B, 3, 224, 224)
-            sensors  = batch["sensor_features"]  # (B, 40)
-            wear     = batch["wear"]             # (B,)
+    scaler  : fitted SensorScaler
     """
     from torch.utils.data import DataLoader
 
@@ -674,6 +724,7 @@ def build_multimodal_dataloaders(
         wear_cap         = wear_cap,
         impute_zero_wear = impute_zero_wear,
         image_size       = image_size,
+        feature_set      = feature_set,
     )
 
     # Build training dataset and fit scaler
@@ -743,51 +794,30 @@ if __name__ == "__main__":
     labels_csv = Path(DATA_DIR) / "labels.csv"
     sets_csv   = Path(DATA_DIR) / "sets.csv"
 
-    # check = pd.read_csv(labels_csv)
-    # print(check["type"].unique())
-    # print(check[check["type"] == "flank_wear+adhesion"]["Set"].value_counts().sort_index())
+    print("\n=== Sanity check: MATWIMultimodalDataset v2 ===\n")
 
-    print("\n=== Sanity check: MATWIMultimodalDataset ===\n")
+    for fs in ["all40", "top25", "raw25"]:
+        print(f"\n--- feature_set={fs} ---")
+        ds = MATWIMultimodalDataset(
+            data_dir       = DATA_DIR,
+            labels_csv     = labels_csv,
+            sets_csv       = sets_csv,
+            split          = "train",
+            set_range      = "1-13",
+            normalisation  = "dataset",
+            augment        = False,
+            wear_cap       = 450.0,
+            feature_set    = fs,
+            sensor_scaler  = None,
+        )
+        scaler = ds.fit_sensor_scaler()
+        print(repr(ds))
+        print(f"  n_selected_features: {ds.n_selected_features}")
+        print(f"  Feature names (first 5): {ds.get_feature_names()[:5]}")
+        print(f"  Type counts: {ds.get_type_counts()}")
 
-    # Build train, fit scaler
-    train_ds = MATWIMultimodalDataset(
-        data_dir       = DATA_DIR,
-        labels_csv     = labels_csv,
-        sets_csv       = sets_csv,
-        split          = "train",
-        set_range      = "1-13",
-        normalisation  = "dataset",
-        augment        = False,
-        wear_cap       = 450.0,
-        impute_zero_wear = False,
-        sensor_scaler  = None,
-    )
-    scaler = train_ds.fit_sensor_scaler()
-    print(repr(train_ds))
-    print(f"  Feature names (first 5): {train_ds.get_feature_names()[:5]}")
-    print(f"  Type counts: {train_ds.get_type_counts()}")
-
-    # Build val with fitted scaler
-    val_ds = MATWIMultimodalDataset(
-        data_dir       = DATA_DIR,
-        labels_csv     = labels_csv,
-        sets_csv       = sets_csv,
-        split          = "val",
-        set_range      = "1-13",
-        normalisation  = "dataset",
-        augment        = False,
-        wear_cap       = 450.0,
-        impute_zero_wear = False,
-        sensor_scaler  = scaler,
-    )
-    print(repr(val_ds))
-
-    # Load one batch from each
-    for name, ds in [("train", train_ds), ("val", val_ds)]:
         loader = DataLoader(ds, batch_size=4, shuffle=False, num_workers=0)
         batch  = next(iter(loader))
-        print(f"\n  [{name}] image shape       : {batch['image'].shape}")
-        print(f"  [{name}] sensor_features   : {batch['sensor_features'].shape}")
-        print(f"  [{name}] wear (norm)        : {batch['wear']}")
-        print(f"  [{name}] wear (µm)          : {batch['wear_raw']}")
-        print(f"  [{name}] sensor feat sample : {batch['sensor_features'][0, :5]}")
+        print(f"  image shape         : {batch['image'].shape}")
+        print(f"  sensor_features     : {batch['sensor_features'].shape}")
+        print(f"  wear (norm) sample  : {batch['wear']}")
