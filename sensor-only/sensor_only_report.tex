@@ -1,0 +1,617 @@
+% =====================================================================
+%   Sensor-Only Wear Prediction on MATWI — Technical Report
+%   Project PINN (Stage 2 sub-track)
+%
+%   Compile with:  pdflatex sensor_only_report.tex
+% =====================================================================
+
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[margin=2.4cm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue!60!black,
+    urlcolor=blue!60!black,
+    citecolor=blue!60!black,
+}
+
+% --- Listings style for file / code references --------------------------
+\definecolor{codebg}{rgb}{0.96,0.96,0.96}
+\lstset{
+    basicstyle=\ttfamily\small,
+    backgroundcolor=\color{codebg},
+    breaklines=true,
+    showstringspaces=false,
+    columns=fullflexible,
+    frame=single,
+    framerule=0pt,
+    xleftmargin=4pt,
+    framexleftmargin=4pt,
+}
+
+% --- Convenience commands -----------------------------------------------
+\newcommand{\code}[1]{\texttt{#1}}
+\newcommand{\um}{\,\textmu m}
+
+\title{Sensor-Only Wear Prediction on MATWI \\[2pt]
+       \large Engineered features, per-set deltas, and gradient boosting}
+\author{Project PINN --- Stage 2 sub-track}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\noindent
+This report documents the sensor-only sub-track of the MATWI wear-prediction
+project. The starting point was a Ridge regression on 40 hand-engineered
+sensor features (\code{sensor\_check.py}), which produced a test
+MAE of 56.0\um{} --- \emph{worse} than predicting the training mean (40.9\um).
+A second-generation pipeline (\code{sensor\_only\_v2.py}) was built that
+combines (i)~a richer dimensionless feature set, (ii)~per-set delta features
+that subtract a learned ``unworn baseline,'' (iii)~LightGBM in addition to
+Ridge, and (iv)~leave-one-set-out cross-validation. The best resulting
+method, \code{lgbm\_v2cut\_absolute}, reaches \textbf{29.9\um{} test MAE}
+($-11\um$ vs.\ predict-mean, $-26\um$ vs.\ the original baseline) with
+\textbf{54.8\um{} LOSO-pooled MAE}. All LightGBM variants cluster in the
+$29$--$33\um$ test band, indicating a genuine ceiling on the engineered-feature
+sensor-only setup. The dominant remaining error source is two anomalous
+training sets (5 and 11) whose LOSO folds blow up to 93--169\um{} regardless
+of model or features, and which are \emph{not} explained by cutting-parameter
+differences. The result is a defensible sensor-only baseline; further sensor
+work shows diminishing returns relative to the project's main contribution,
+the Stage 3 physics-informed loss.
+\end{abstract}
+
+% =====================================================================
+\section{Motivation and scope}
+% =====================================================================
+
+The MATWI dataset (De Pauw et al., KU Leuven, 2023) provides paired
+images and multi-channel sensor recordings for 17 milling tools run to
+failure. The project's main pipeline performs \emph{vision-only} and
+\emph{vision+sensor fusion} wear prediction. Before invoking fusion, a
+question worth asking is: \textbf{can the sensor channels alone predict
+wear at all?}
+
+A first attempt (\code{sensor\_check.py}, the predecessor of this
+sub-track) answered: not really. A Ridge regression on 40 hand-engineered
+sensor features achieved 56.0\um{} test MAE --- a model that performs
+\emph{worse} than the trivial baseline of always predicting the training
+mean (40.9\um). The training MAE of 21.7\um{} confirmed massive
+overfitting; the model was memorising set identity, not learning wear.
+
+This sub-track set out to build a meaningful sensor-only baseline. The
+goal was not to match vision-only performance (19\um{} test MAE), which
+is unrealistic on this dataset, but to (a)~beat predict-mean by a credible
+margin, (b)~understand \emph{why} the v1 attempt failed, and (c)~establish
+a clean reference for future physics-informed and fusion experiments.
+
+% =====================================================================
+\section{Folder contents}
+% =====================================================================
+
+All files described below live in this folder (\code{sensor-only/}). The
+shared multimodal dataset class is in the sibling \code{vision-sensor/}
+folder and is imported via a path-search helper.
+
+\begin{description}[style=nextline,labelindent=0pt,leftmargin=2em]
+
+\item[\code{sensor\_check.py}]
+    The first-generation sensor-only baseline. Reuses the
+    \code{MATWIMultimodalDataset} class from \code{vision-sensor/} to
+    extract its 40 hand-engineered features per sample (5 channels
+    $\times$ 8 features: mean, std, RMS, peak-to-peak, kurtosis,
+    dominant frequency, low-band energy, mid-band energy). Fits a Ridge
+    regression with an L2 standardiser; reports MAE on train, val, test
+    broken down by wear type, and dumps per-feature
+    $|$coefficient$|$ rankings. Used to diagnose the original failure
+    mode (it overfits to absolute, gain-dependent spectral energies).
+
+\item[\code{sensor\_check.sh}]
+    SLURM submission script for \code{sensor\_check.py}, configured for
+    Snellius (gpu\_a100, 30~minutes, 4~CPUs, 16~GB). The CPU budget is
+    the bottleneck because feature extraction is dominated by CSV I/O,
+    not GPU compute.
+
+\item[\code{sensor\_only\_v2.py}]
+    The second-generation pipeline and the main contribution of this
+    sub-track. Re-implements the feature extractor with $\sim$85 dimensionless
+    features (relative spectral bands, robust spread statistics,
+    within-pass windowed RMS trend, cross-channel force resultant);
+    adds an optional per-set delta transform; supports both Ridge and
+    LightGBM models; loads cutting parameters (\code{Vc, fz, Vf, Ae,
+    Ap, z, material}) from \code{sets.csv} as additional features for
+    LightGBM; and runs all comparisons under both the official
+    train/val/test split and leave-one-set-out cross-validation on
+    training sets. Outputs are cached so re-runs take $\sim$30 seconds
+    instead of 5 minutes.
+
+\item[\code{sensor\_only\_report.tex}]
+    This document.
+
+\end{description}
+
+Results from running \code{sensor\_only\_v2.py} are written by default to
+\code{runs/sensor\_only\_v2/} at the project root:
+
+\begin{lstlisting}
+runs/sensor_only_v2/
+  features_cache_1_13.npz     extracted v1+v2 features (reused on reruns)
+  results.json                full per-method, per-split metrics
+  results.csv                 flat table (sorted by test MAE)
+  loso_results.csv            per-fold leave-one-set-out breakdown
+  feature_importance.csv      top 20 features of the best method
+\end{lstlisting}
+
+% =====================================================================
+\section{Methodology}
+% =====================================================================
+
+% ----------------------------------------------------------------
+\subsection{Diagnosis of the v1 failure}
+% ----------------------------------------------------------------
+
+The v1 extractor's 40 features included \emph{absolute} spectral band
+energies (\code{Fx\_low\_energy = np.sum(fft\_power[mask])}). These
+quantities scale linearly with sensor gain, signal amplitude, and
+recording length --- all of which differ per set in MATWI. The v1
+Ridge model's top-5 features by $|\text{coef}|$ were exactly these
+band energies, meaning the model was using them as set-identity
+proxies. When the train$\to$test distribution shift kicked in (train
+is CK45 only; val/test include RVS\,304), those proxies became
+anti-correlated with wear and the model collapsed.
+
+Three concrete problems were identified in the v1 extractor:
+
+\begin{enumerate}
+    \item \textbf{Absolute spectral energies} (gain- and length-dependent).
+    \item \textbf{Whole-pass global statistics} (\code{p2p}, \code{kurtosis})
+          over $\sim$99{,}000 samples, dominated by single outliers; whole-pass
+          dominant frequency, which is essentially meaningless on a broad
+          spectrum.
+    \item \textbf{No cross-channel physical features}, although tool wear
+          physically raises the cutting force resultant $F_\text{res} =
+          \sqrt{F_x^2 + F_y^2 + F_z^2}$ in a coordinate-frame-independent
+          way.
+\end{enumerate}
+
+% ----------------------------------------------------------------
+\subsection{Tier 1 --- v2 feature engineering}
+% ----------------------------------------------------------------
+
+The new feature extractor produces 85 features per sample:
+
+\paragraph{Per channel (15 features $\times$ 5 channels = 75).}
+For each of \code{acc, acoustic, Fx, Fy, Fz}:
+\begin{description}[style=nextline,labelindent=0pt,leftmargin=2em]
+    \item[Basic statistics (3)] mean, std, RMS.
+    \item[Robust spread (2)] interquartile range $p_{75}-p_{25}$ and
+        $p_{95}-p_{5}$. Replaces the v1 \code{p2p}, which over 99k
+        samples reduces to a single outlier.
+    \item[Robust shape (1)] fraction of samples beyond $3\sigma$ from
+        the mean. Replaces the v1 \code{kurtosis}, which is similarly
+        outlier-dominated.
+    \item[Windowed RMS trend (4)] split the pass into $N{=}10$
+        contiguous windows; compute RMS per window; fit a line to RMS
+        vs.\ normalised window index. Report (mean, std, slope,
+        intercept). The \emph{slope} is the within-pass temporal
+        evolution that whole-pass globals destroy.
+    \item[Spectral (5)] three \emph{relative} band energies (each
+        band's power divided by total power), spectral entropy
+        (Shannon, on the normalised power spectrum), and spectral
+        centroid in Hz. All five are dimensionless or in physical
+        units that do not depend on sensor gain or recording length.
+\end{description}
+
+\paragraph{Cross-channel (10 features).}
+\begin{itemize}
+    \item Force resultant $F_\text{res}$: mean, std, windowed
+          (mean\_rms, std\_rms, slope\_rms, intercept\_rms). Six features.
+    \item Mean of $|F_x|/|F_y|$ ratio.
+    \item Per-axis coefficient of variation $\sigma/|\mu|$ for $F_x,
+          F_y, F_z$.
+\end{itemize}
+
+The hypothesis was that these features would generalise across setups
+where the v1 features could not. Empirically, this turned out to be
+true only for tree-based models (see Results).
+
+% ----------------------------------------------------------------
+\subsection{Tier 2 --- per-set delta features}
+% ----------------------------------------------------------------
+
+The MATWI dataset suffers from setup-to-setup signal-amplitude drift
+that survives even careful feature engineering. To remove this for
+linear models, the v2 pipeline computes a \emph{per-set baseline
+feature vector} as the mean over the $K{=}3$ lowest-\code{SensorID}
+passes for each set, then subtracts that baseline from every sample
+in the set:
+\begin{equation*}
+    \tilde{x}_i \;=\; x_i \;-\;
+        \frac{1}{K}\sum_{j \in \text{first-K}(s_i)}\!\!\!\! x_j .
+\end{equation*}
+The key observation: \code{SensorID} is the recording-order index
+\emph{not} the wear label, so using the early-passes-as-reference is
+legitimate even on val/test sets --- there is no label leakage.
+Each set is also entirely contained in one official split (e.g.,
+all of set~3 is in val), so the baseline computation does not cross
+the split boundary.
+
+Per-set deltas dramatically improved Ridge (test MAE 56.0$\to$34.8 for
+the v1 features) but slightly hurt LightGBM, because tree splits do
+not benefit from mean-centering --- subtracting a baseline destroys
+absolute-scale information that splits could otherwise use.
+
+% ----------------------------------------------------------------
+\subsection{Tier 3 --- LightGBM}
+% ----------------------------------------------------------------
+
+LightGBM (Microsoft's gradient-boosted decision-tree implementation) is
+the natural model class for tabular problems of this size. Compared to
+Ridge, it captures nonlinear feature interactions and is invariant to
+feature scaling (tree splits are threshold comparisons). Compared to
+neural networks, it is far less prone to overfitting on $\sim$647
+training samples and provides interpretable per-feature gain
+importances.
+
+Hyperparameters (small-data conservative):
+\begin{lstlisting}
+objective         = "regression_l1"   # MAE objective
+learning_rate     = 0.03
+num_leaves        = 31
+max_depth         = 5
+min_data_in_leaf  = 10
+feature_fraction  = 0.8               # per-tree feature subsample
+bagging_fraction  = 0.8               # per-tree row subsample
+lambda_l2         = 1.0               # L2 on leaf values
+num_boost_round   = 3000
+early_stopping    = 150               # patience on val MAE
+\end{lstlisting}
+
+Missing values (e.g., Set~1's unknown cutting parameters) are passed
+through natively --- LightGBM learns at each split whether NaN values
+should be routed left or right.
+
+The original v1 \code{sensor\_check.py} additionally provided a
+\textbf{Ridge sanity check} that this sub-track did not replace.
+Treating that script as the v1 baseline keeps the comparison honest:
+both v1 Ridge and v2 Ridge are evaluated in \code{sensor\_only\_v2.py}
+under identical splits and evaluation harnesses.
+
+% ----------------------------------------------------------------
+\subsection{Cutting-parameter features}
+% ----------------------------------------------------------------
+
+The eight cutting parameters from \code{sets.csv} ($V_c$, $n$, $f_z$,
+$V_f$, $A_e$, $A_p$, $z$, material as a binary RVS flag) are appended
+to the v2 features for the LightGBM \code{*cut*} methods. The csv has
+a few messy cells: Set~1 has all-unknown parameters (encoded as
+``?'') and Set~6 has variable feed rate ``185/148'' --- both handled
+by the parser (\code{?}~$\to$~NaN, ``a/b''~$\to$~mean of parts).
+
+The hypothesis was that adding cutting parameters would let LightGBM
+\emph{route} predictions by cutting regime, especially for the
+LOSO-outlier sets 5 and 11. As reported below, this hypothesis
+failed empirically.
+
+% ----------------------------------------------------------------
+\subsection{Evaluation: official split + leave-one-set-out CV}
+% ----------------------------------------------------------------
+
+The standard evaluation is on the official train (sets
+\{1,2,5,7,8,10,11\}) / val (\{3,6,12\}) / test (\{4,9,13\}) split,
+where wear MAE is also broken down by wear type (flank, adhesion,
+flank+adhesion). However, the official val set contains set~12
+(RVS\,304, never seen in training) and is therefore an unreliable
+guide to in-distribution generalisation.
+
+\textbf{Leave-one-set-out (LOSO) CV} on the seven training sets
+provides a fairer signal. For each training set $s$, train on the
+other six sets and evaluate on $s$. Predictions are pooled across
+folds and the pooled MAE is reported. For delta-based methods, the
+per-set baseline is recomputed inside each fold (using the held-out
+set's own \code{SensorID} order, so there is no label leakage).
+
+The discrepancy between LOSO MAE and test MAE is itself diagnostic:
+similar values mean the model generalises across setups; a much
+worse LOSO indicates dependence on specific training sets.
+
+% =====================================================================
+\section{Results}
+% =====================================================================
+
+% ----------------------------------------------------------------
+\subsection{Comparison matrix}
+% ----------------------------------------------------------------
+
+Table~\ref{tab:results} summarises all methods on the official split
+plus LOSO-pooled CV on training sets.
+
+\begin{table}[h]
+\centering
+\caption{Test, val and LOSO-pooled MAE in \textmu m. The full method
+matrix from \code{results.csv}.}
+\label{tab:results}
+\small
+\begin{tabular}{lrrrr}
+\toprule
+Method                          &  val  &  test &  LOSO  &  train \\
+\midrule
+predict\_mean\_train            & 57.7  & 40.9  &   ---  &  ---   \\
+\midrule
+ridge\_v1\_absolute (baseline)  & 85.8  & 56.0  &  78.7  &  21.7  \\
+ridge\_v1\_delta                & 78.4  & 34.8  & 112.7  &  23.0  \\
+ridge\_v2\_absolute             & 84.2  & 59.2  & 106.1  &  19.9  \\
+ridge\_v2\_delta                & 88.6  & 50.1  &  69.0  &  18.7  \\
+\midrule
+lgbm\_v2\_absolute              & 49.9  & 31.9  &  55.0  &  49.3  \\
+lgbm\_v2\_delta                 & 49.7  & 35.0  &  62.7  &  54.5  \\
+lgbm\_v2cut\_absolute           & 50.2  & \textbf{29.9} & \textbf{54.8} &  44.8 \\
+lgbm\_v1v2\_absolute            & 49.8  & 31.2  &  58.3  &  49.1  \\
+lgbm\_v1v2cut\_absolute         & 49.9  & 32.6  &  60.9  &  51.3  \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent
+Five observations:
+
+\begin{enumerate}
+    \item \textbf{Best method: \code{lgbm\_v2cut\_absolute} at 29.9\um{}
+          test, 54.8\um{} LOSO.} A clean $-11\um$ vs.\ predict-mean
+          and $-26\um$ vs.\ the original Ridge baseline.
+    \item \textbf{LightGBM variants cluster tightly (29.9--32.6\um{}
+          test).} Cutting parameters, kitchen-sink feature unions,
+          and patience tweaks all move the needle by less than
+          $3\um$. The model is at its ceiling.
+    \item \textbf{Per-set delta helps Ridge but hurts LightGBM.}
+          Ridge needs the linear-model fix; tree splits handle scale
+          natively and lose information when it is removed.
+    \item \textbf{The v2 features helped only when combined with
+          LightGBM.} Under Ridge, v2 was no better than v1 (in
+          fact slightly worse) --- 85 features on 647 samples
+          overfits Ridge. Under LightGBM, the new robust-spread,
+          spectral, and cross-channel features are heavily used (see
+          \S\ref{sec:fimp}).
+    \item \textbf{Val is harder than test.} Set~12 (RVS\,304) makes
+          val a true out-of-distribution split. Best-LightGBM val
+          MAE (49.9\um) is barely below predict-mean on val (57.7\um),
+          while test MAE drops by $\sim$11\um. The official val set
+          is therefore unreliable for selecting between models;
+          LOSO is the better signal.
+\end{enumerate}
+
+% ----------------------------------------------------------------
+\subsection{Feature importance (best method)}
+\label{sec:fimp}
+% ----------------------------------------------------------------
+
+Table~\ref{tab:fimp} lists the top 20 features of
+\code{lgbm\_v2cut\_absolute} by LightGBM ``gain'' importance.
+
+\begin{table}[h]
+\centering
+\caption{Top 20 features by LightGBM gain importance.
+Eight of the top 20 are v2-specific (marked \textsuperscript{$\star$});
+all ten cutting parameters were available but only one (\code{material\_RVS},
+not shown) appeared in the top 30.}
+\label{tab:fimp}
+\small
+\begin{tabular}{rlr}
+\toprule
+Rank & Feature & $|$gain$|$ \\
+\midrule
+ 1 & \code{Fx\_p95mp05}\textsuperscript{$\star$}            & 1047 \\
+ 2 & \code{Fy\_std}                                          &  863 \\
+ 3 & \code{Fx\_std}                                          &  725 \\
+ 4 & \code{Fy\_p95mp05}\textsuperscript{$\star$}            &  242 \\
+ 5 & \code{Fy\_spec\_entropy}\textsuperscript{$\star$}      &  160 \\
+ 6 & \code{Fy\_mean}                                         &  155 \\
+ 7 & \code{Fx\_mean}                                         &  121 \\
+ 8 & \code{Fx\_cv}\textsuperscript{$\star$}                 &  106 \\
+ 9 & \code{Fx\_spec\_entropy}\textsuperscript{$\star$}      &   86 \\
+10 & \code{Fy\_rel\_e\_b2}\textsuperscript{$\star$}         &   70 \\
+11 & \code{Fy\_cv}\textsuperscript{$\star$}                 &   66 \\
+12 & \code{Fx\_win\_mean\_rms}\textsuperscript{$\star$}     &   57 \\
+13 & \code{acc\_frac3sig}\textsuperscript{$\star$}          &   57 \\
+14 & \code{Fres\_win\_std\_rms}\textsuperscript{$\star$}    &   56 \\
+15 & \code{Fy\_win\_mean\_rms}\textsuperscript{$\star$}     &   49 \\
+16 & \code{Fy\_win\_intercept\_rms}\textsuperscript{$\star$}&   46 \\
+17 & \code{Fz\_mean}                                         &   36 \\
+18 & \code{acoustic\_frac3sig}\textsuperscript{$\star$}     &   34 \\
+19 & \code{acc\_win\_std\_rms}\textsuperscript{$\star$}     &   32 \\
+20 & \code{FxFy\_ratio\_mean}\textsuperscript{$\star$}      &   30 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent
+The picture is consistent and physical: force channels dominate (17 of
+the top 20), the force resultant cross-channel feature is used, and
+the v2-specific robust spread features ($p_{95}{-}p_{5}$) hold the top
+positions. Cutting parameters were available but not heavily used,
+explaining why they added almost no test-MAE improvement.
+
+% ----------------------------------------------------------------
+\subsection{Per-fold LOSO breakdown}
+\label{sec:loso}
+% ----------------------------------------------------------------
+
+Pooled LOSO MAE hides important structure. Table~\ref{tab:loso} shows
+per-fold MAE for the two best methods.
+
+\begin{table}[h]
+\centering
+\caption{Leave-one-set-out per-fold test MAE in \textmu m.
+Sets 5 and 11 are systematic outliers --- adding cutting parameters
+barely changes them.}
+\label{tab:loso}
+\small
+\begin{tabular}{crrr}
+\toprule
+Heldout set & lgbm\_v2\_absolute & lgbm\_v2cut\_absolute & $\Delta$ \\
+\midrule
+ 1 &  27.9 & 26.2 & $-1.7$ \\
+ 2 &  56.0 & 57.6 & $+1.6$ \\
+ 5 & 168.9 & \textbf{168.5} & $-0.4$ \\
+ 7 &  25.3 & 27.1 & $+1.8$ \\
+ 8 &  25.4 & 26.7 & $+1.3$ \\
+10 &  28.9 & 25.9 & $-3.0$ \\
+11 &  94.4 & \textbf{93.4} & $-1.0$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent
+\textbf{Five of seven folds give 25--57\um{} --- a perfectly respectable
+sensor-only result.} The remaining two (5 and 11) blow up by a factor
+of $3$--$6\times$, dragging the pooled LOSO from $\sim$28\um{} (if
+those two sets were excluded) up to 55\um{}. Crucially, adding cutting
+parameters does \emph{not} fix sets 5 and 11; the largest improvement
+on either is $-1.7\um$. Sets 5 ($V_c{=}174, f_z{=}0.04, V_f{=}148$) and
+11 ($V_c{=}174, f_z{=}0.043, V_f{=}159$) sit \emph{inside} the
+parameter envelope of the other training sets, so they are not
+extrapolating in regime space. The anomaly must therefore be in the
+sensor signatures or wear-progression curves themselves --- likely
+tool variation, lubrication, or sensor calibration drift on those
+recordings --- and is not recoverable through feature engineering on
+the existing channels.
+
+% =====================================================================
+\section{Findings}
+% =====================================================================
+
+\begin{enumerate}
+    \item The original 56\um{} Ridge failure was caused by the
+          extractor relying on \emph{absolute} spectral band energies
+          that doubled as set-identity proxies. Replacing them with
+          dimensionless spectral shape features (relative band energy,
+          entropy, centroid) fixed this in principle, but the gain only
+          materialised once the model class was changed too.
+
+    \item \textbf{The single biggest intervention for sensor-only is
+          switching to LightGBM.} Ridge with v2 features peaks at
+          50\um{} test; LightGBM with the same features peaks at
+          32\um{}. Tree splits both (a)~capture nonlinear interactions
+          between features that Ridge cannot, and (b)~handle the
+          residual setup-to-setup scale drift that Ridge stumbles on.
+
+    \item \textbf{Per-set delta features are a Ridge-specific patch,
+          not a universal one.} They cut Ridge test MAE on v1 features
+          by $\sim$21\um{} but cost LightGBM $\sim$5\um. This is a useful
+          lesson for any future modelling: linear-model fixes do not
+          always transfer to tree models.
+
+    \item \textbf{Cutting parameters helped slightly but did not
+          explain the LOSO outliers.} The hypothesis that sets 5 and
+          11 were anomalous because of their cutting regime was
+          \emph{falsified}: the model can see the parameters and
+          still fails on those folds. The actual cause is at the
+          sensor or wear-progression level, not the cutting physics.
+
+    \item \textbf{There is a real ceiling.} All LightGBM variants are
+          within 3\um{} of each other on test and within 6\um{} on
+          LOSO. The kitchen-sink combination (v1$\cup$v2$\cup$cutting)
+          is in fact the worst LightGBM variant, indicating diminishing
+          returns from feature accumulation. Further engineering on
+          the same sensor channels is unlikely to move the needle.
+\end{enumerate}
+
+% =====================================================================
+\section{Limitations and the ceiling}
+% =====================================================================
+
+The remaining error budget breaks down approximately as follows
+(qualitative, not from a formal decomposition):
+
+\begin{itemize}
+    \item \textbf{Two anomalous training sets (5, 11)} account for the
+          gap between pooled LOSO ($\sim$55\um) and the typical-fold
+          LOSO ($\sim$28\um). These would require either dropping
+          (yielding a more optimistic but smaller-data estimate) or a
+          fundamentally different model class --- per-sample rather
+          than per-pass features, for instance.
+
+    \item \textbf{CK45 $\to$ RVS\,304 distribution shift} caps val and
+          part of test performance. Set~12 (val) and set~13 (test) are
+          RVS\,304 but no RVS\,304 appears in train under the official
+          \code{set\_range="1-13"} setting. Running with
+          \code{--set-range 1-17} (adding sets 14--17 to training)
+          would address this but breaks comparability with the
+          published baselines.
+
+    \item \textbf{Sample size (647 training samples)} caps model
+          complexity. Approaches like 1D-CNNs over raw downsampled
+          sequences, or transformer encoders over windowed segments,
+          would add learned representations on top of the engineered
+          features, but each additional parameter risks overfitting
+          on a corpus this small.
+
+    \item \textbf{Vision-only is structurally better-suited to this
+          task.} The vision-only baseline reaches 19\um{} test MAE on
+          the same split because tool wear is fundamentally a visual
+          phenomenon (a worn flank looks different from a fresh one),
+          while the sensor signals reflect wear only indirectly through
+          forces and vibrations that depend on many other factors.
+          \textbf{Sensor-only is not expected to match vision-only on
+          this dataset}, and reaching 29.9\um{} ($1.6\times$ vision-only)
+          on a per-feature-engineering pipeline is a respectable
+          result.
+\end{itemize}
+
+% =====================================================================
+\section{How to reproduce}
+% =====================================================================
+
+\begin{lstlisting}[language=bash]
+# From the project root, after the dataset is downloaded into
+# dataset/matwi/ via dataset/download_data.py.
+
+# Optional but recommended for the full method matrix:
+pip install lightgbm
+
+# Run all methods, save outputs under runs/sensor_only_v2/
+python sensor-only/sensor_only_v2.py \
+    --data-dir   dataset/matwi \
+    --labels-csv dataset/matwi/labels.csv \
+    --output-dir runs/sensor_only_v2
+
+# First run extracts features (~5 min, dominated by CSV I/O).
+# Subsequent runs reuse the cache and finish in ~30 s.
+
+# To exclude cutting-parameter methods:
+#   --no-cutting-params
+
+# To use all sensor samples (drops the require-image filter that
+# matches the existing 647-sample baseline):
+#   --all-sensor-samples
+
+# To include RVS 304 (sets 14-17) in training:
+#   --set-range 1-17
+\end{lstlisting}
+
+% =====================================================================
+\section{Conclusion}
+% =====================================================================
+
+The sensor-only sub-track produced a credible baseline
+(\textbf{29.9\um{} test, 54.8\um{} LOSO}) and a clear diagnosis of why
+it cannot be pushed materially further on the existing sensor channels:
+two anomalous training sets account for most of the LOSO error, and
+the distribution shift to RVS\,304 caps val performance. This is enough
+to support the project's main argument --- that physics-informed loss
+(Stage 3) is a better lever than additional sensor work --- and to
+provide a clean reference point for the sensor-fusion comparisons in
+the multimodal sub-track.
+
+\end{document}

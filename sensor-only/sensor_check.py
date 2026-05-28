@@ -55,6 +55,7 @@ def _load_module(name: str, candidates: list[Path]):
 
 
 _DS = _load_module("dataset_module", [
+    _HERE.parent / "vision-sensor" / "DatasetClass_VisionSensors.py",
     _HERE / "DatasetClass_VisionSensors.py",
 ])
 
