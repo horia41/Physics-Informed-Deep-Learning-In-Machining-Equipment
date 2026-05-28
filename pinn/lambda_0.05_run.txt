@@ -1,3 +1,10 @@
+lambda_max = 0.05, with a 4-epoch linear warm-up — so λ ramped 0.0125 → 0.025 → 0.0375 → 0.05 over epochs 1–4 and stayed at 0.05 after.
+
+ceil vs sym
+Same expected trajectory, different penalty shape:
+sym penalizes (VB_pred − VB_expected)² — deviation in both directions. It pulls predictions toward the physical line whether they're too high or too low. A general "stay near the trajectory" prior.
+ceil penalizes max(0, VB_pred − VB_expected)² — only overprediction. Predict below the line, no penalty; predict above it, you're punished. A soft upper bound.
+
 ============================================================================================
   stage3_vision  —  test set   (Δ vs vision_only_ctrl)
 ============================================================================================

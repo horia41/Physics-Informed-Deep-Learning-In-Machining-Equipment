@@ -1,0 +1,1 @@
+Both variants (sym and ceil), both families, λ ∈ {0.1, 0.2, 0.5}, warmup shortened to 2
