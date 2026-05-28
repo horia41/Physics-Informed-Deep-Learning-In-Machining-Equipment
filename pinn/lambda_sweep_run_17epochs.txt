@@ -1,4 +1,5 @@
 Both variants (sym and ceil), both families, λ ∈ {0.1, 0.2, 0.5}, warmup shortened to 2
+use_taylor_slope was set to false
 
 Fusion's best epoch was 6, but with warmup=4 the physics term only reached full strength at epoch 4 — it had ~2 epochs of real influence before the best checkpoint. That it moved F+A anyway is encouraging, but dropping --warmup to 2 (or 1) lets physics act earlier, which matters specifically because the fusion model converges early. Vision's best epoch was 14, so warm-up matters less there
 
