@@ -54,7 +54,7 @@ import pandas as pd
 
 # ── Configuration matching the rest of the pipeline ──────────────────────────
 WEAR_CAP_UM        = 450.0     # matches DatasetClass_Vision wear_cap
-WEAR_FAILURE_UM    = 300.0     # ISO VB ceiling — used ONLY as the C/clamp anchor
+WEAR_FAILURE_UM    = 90.0     # ISO VB ceiling — used ONLY as the C/clamp anchor
 DEFAULT_TRAIN_SETS = (1, 2, 5, 7, 8, 10, 11, 12, 13)   # paper train (1-13 range)
 WINDOW_LO, WINDOW_HI = 0.15, 0.85   # mid-life band fraction of max ImageID
 
@@ -185,67 +185,67 @@ def fit_set_trajectories(df: pd.DataFrame, sets: pd.DataFrame,
 
 
 # ── Taylor n, C per material from the rates ──────────────────────────────────
-def fit_taylor_constants(set_recs: Dict[int, dict], failure_um: float,
-                         verbose: bool = True) -> Dict[str, dict]:
-    constants: Dict[str, dict] = {}
-    if verbose:
-        print("\n  TAYLOR FIT  log(Vc) = a + n·log(slope)   [n = how rate scales with speed]")
-        print("  " + "-" * 72)
-    for mat in ["CK45", "RVS 304"]:
-        recs = [r for r in set_recs.values()
-                if r["material"] == mat and r["slope_um_per_pass"] > 1e-4]
-        
-        n_distinct_vc = len({round(r["Vc"], 3) for r in recs})
-        
-        # --- MODIFIED: Added 'or True' to force supervisor's literature midpoints ---
-        if len(recs) < 2 or n_distinct_vc < 2 or True:
-            # --- MODIFIED: Load specific (n, m, C) from supervisor brief ---
-            if mat == "CK45":
-                n_lit = 0.25
-                m_lit = 0.65
-                C_lit = 350.0
-            else:  # RVS 304
-                n_lit = 0.20
-                m_lit = 0.55
-                C_lit = 140.0
-                
-            # --- MODIFIED: Added 'm' and replaced anchored calculation with pure literature constants ---
-            constants[mat] = {
-                "n": n_lit, 
-                "m": m_lit,  # Added feed rate exponent variable
-                "C": round(float(C_lit), 4),
-                "r2": None, 
-                "n_sets": len(recs),
-                "n_distinct_vc": n_distinct_vc, 
-                "source": "supervisor_literature"
-            }
+def fit_taylor_constants(set_recs, failure_um, verbose=True):
+    """
+    Fits the extended logarithmic Taylor equation:
+       ln(Vc) = ln(C) - n*ln(T) - m*ln(fz)
+    strictly using the isolated data from the training sets.
+    """
+    from sklearn.linear_model import LinearRegression
+
+    constants = {}
+    
+    # Group records by material type
+    material_groups = {"CK45": [], "RVS 304": []}
+    for s, r in set_recs.items():
+        # Safeguard: Set 1 has unknown values ('?') in sets.csv, skip it to protect regression math
+        if str(s) == "1" or s == 1:
+            continue
+        mat = r["material"]
+        if mat in material_groups:
+            material_groups[mat].append(r)
+
+    for mat, recs in material_groups.items():
+        if len(recs) < 2:
             if verbose:
-                print(f"  [{mat}] Applying supervisor literature benchmarks"
-                      f" -> n={n_lit}, m={m_lit}, C={C_lit}")
+                print(f"  [{mat}] Insufficient data points to fit exponents. Using standard fallback baseline.")
+            constants[mat] = {"n": 0.25, "m": 0.50, "C": 300.0}
             continue
             
-        # --- UNREACHABLE BY DESIGN FOR DATASETS LACKING VC VARIANCE ---
-        logV = np.array([np.log(r["Vc"]) for r in recs])
-        logk = np.array([np.log(r["slope_um_per_pass"]) for r in recs])
-        A = np.column_stack([np.ones(len(logk)), logk])
-        (a, n), *_ = np.linalg.lstsq(A, logV, rcond=None)
-        C = float(np.exp(a + n * np.log(failure_um)))
-        pred = A @ np.array([a, n])
-        ss_res = float(np.sum((logV - pred) ** 2))
-        ss_tot = float(np.sum((logV - logV.mean()) ** 2))
-        r2 = 1 - ss_res / ss_tot if ss_tot > 1e-12 else None
-        
-        # --- MODIFIED: Added default m parameter here just for schema structural uniformity ---
-        constants[mat] = {"n": round(float(n), 6), "m": 0.0, "C": round(float(C), 4),
-                          "r2": round(r2, 4) if r2 is not None else None,
-                          "n_sets": len(recs), "n_distinct_vc": n_distinct_vc,
-                          "source": "fitted"}
-        if verbose:
-            warn = "  ** only 2 distinct Vc: n is weakly identified **" if n_distinct_vc == 2 else ""
-            print(f"  [{mat}] n={n:.4f}  C={C:.2f}  R2={r2}  (sets={len(recs)}){warn}")
+        # Build the logarithmic regression design matrix
+        # Independent variables: X1 = ln(T), X2 = ln(fz)
+        # Dependent target variable: Y = ln(Vc)
+        X = []
+        Y = []
+        for r in recs:
+            # T0 is the estimated passes to hit 90 micrometers from the steady-state window
+            T0 = failure_um / r["slope_um_per_pass"]
+            X.append([np.log(T0), np.log(r["fz"])])
+            Y.append(np.log(r["Vc"]))
             
-    return constants
+        # Run Ordinary Least Squares (OLS) Linear Regression
+        reg = LinearRegression().fit(np.array(X), np.array(Y))
+        
+        # Extract the physical constants from the linear coefficients:
+        # beta_1 = -n  =>  n = -beta_1
+        # beta_2 = -m  =>  m = -beta_2
+        # intercept = ln(C) => C = exp(intercept)
+        n_fit = -reg.coef_[0]
+        m_fit = -reg.coef_[1]
+        C_fit = np.exp(reg.intercept_)
+        
+        constants[mat] = {
+            "n": float(round(n_fit, 4)),
+            "m": float(round(m_fit, 4)),
+            "C": float(round(C_fit, 4)),
+            "n_sets": len(recs),
+            "source": "localized_training_fit_90um"
+        }
+        
+        if verbose:
+            print(f"  [{mat}] Custom Fit (90um Finish Line) -> n={n_fit:.4f}, m={m_fit:.4f}, C={C_fit:.2f}")
 
+    return constants
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Stage 3 Phase 1: fit Taylor constants offline.")

@@ -37,6 +37,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Dict, Optional, Sequence
+import numpy as np
 
 import torch
 import torch.nn as nn
