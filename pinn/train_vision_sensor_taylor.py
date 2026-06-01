@@ -48,14 +48,13 @@ def _load_module(name: str, candidates: list[Path]):
     raise FileNotFoundError(f"Could not find '{name}'. Searched: "
                             + ", ".join(str(p) for p in candidates))
 
-# train_vision_sensor.py is looked up locally, then in the sibling vision-sensor/
-# dir (and its improve_attempt/ subdir) where the Stage-2/task-3 files live.
-# Loaded from there, it self-resolves its own model/dataset deps, so nothing
-# needs copying into pinn/.
+# train_vision_sensor.py is looked up locally, then in the sibling
+# vision-sensor/ dir where the Stage-2/task-3 files live. Loaded from there,
+# it self-resolves its own model/dataset deps, so nothing needs copying into
+# pinn/.
 _TVS = _load_module("train_vision_sensor_base", [
     _HERE / "train_vision_sensor.py",
     _HERE / ".." / "vision-sensor" / "train_vision_sensor.py",
-    _HERE / ".." / "vision-sensor" / "improve_attempt" / "train_vision_sensor.py",
 ])
 _TPL = _load_module("taylor_physics_loss", [
     _HERE / "taylor_physics_loss.py",
@@ -149,11 +148,9 @@ def run(base_cfg, args, device, out_dir: Path, name: str) -> None:
                                   weight_decay=base_cfg.weight_decay)   # fixed LR, no scheduler
     data_criterion = nn.MSELoss()
     physics_loss = TaylorPhysicsLoss(
-        constants_path=args.constants, lambda_max=max(args.lambda_max, 1e-9),
+        constants_path=args.constants, lambda_max=args.lambda_max,
         warmup_epochs=args.warmup, apply_to=args.apply_to,
         one_sided=args.one_sided, use_taylor_slope=args.use_taylor_slope)
-    if args.lambda_max <= 0.0:
-        physics_loss.lambda_max = 0.0
     print(f"  PhysicsLoss: {physics_loss.extra_repr()}")
 
     history, best_state, best_val, best_ep = [], None, float("inf"), -1

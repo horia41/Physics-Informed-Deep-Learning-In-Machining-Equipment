@@ -155,8 +155,9 @@ def fit_set_trajectories(df: pd.DataFrame, sets: pd.DataFrame,
         lo, hi = WINDOW_LO * t_max, WINDOW_HI * t_max
         m = (t >= lo) & (t <= hi)
         tw, ww = (t[m], w[m]) if m.sum() >= 3 else (t, w)
-        slope, icpt = theil_sen(tw, ww)
-        slope = max(slope, 0.0)   # wear does not decrease in expectation
+        slope_raw, icpt = theil_sen(tw, ww)
+        slope_clamped = slope_raw < 0.0
+        slope = max(slope_raw, 0.0)   # wear does not decrease in expectation
         max_wear = float(w.max())
         rec = {
             "set": s, "material": material_of(s),
@@ -165,6 +166,8 @@ def fit_set_trajectories(df: pd.DataFrame, sets: pd.DataFrame,
             "max_wear_um": max_wear,
             "frac_of_failure": max_wear / WEAR_FAILURE_UM,
             "slope_um_per_pass": slope,
+            "slope_raw_um_per_pass": float(slope_raw),
+            "slope_clamped": bool(slope_clamped),
             "intercept_um": icpt,
             "window_lo_id": lo, "window_hi_id": hi,
             "n_window": int(m.sum()),
@@ -181,21 +184,34 @@ def fit_set_trajectories(df: pd.DataFrame, sets: pd.DataFrame,
 # ── Taylor n, C per material from the rates ──────────────────────────────────
 def fit_taylor_constants(set_recs: Dict[int, dict], failure_um: float,
                          verbose: bool = True) -> Dict[str, dict]:
+    """
+    Fit V_c · T^n = C per material using the noise-on-y direction:
+        log T = (log C)/n  -  (1/n)·log V   →   regress logT on logV
+    where T_s = W_f / k_s (W_f = failure_um, k_s = observed mid-life wear rate).
+    V_c is the controlled experimental variable (no measurement error), so it
+    belongs on the x-axis under OLS assumptions. Recovers n = -1/slope and
+    log C = intercept · n. The previous direction (logV on logk) put noise on
+    the x-axis and biased n toward zero.
+    """
     constants: Dict[str, dict] = {}
     if verbose:
-        print("\n  TAYLOR FIT  log(Vc) = a + n·log(slope)   [n = how rate scales with speed]")
+        print("\n  TAYLOR FIT  log T = a + b·log(Vc)   →   n = -1/b,  C = exp(a·n)")
         print("  " + "-" * 72)
     for mat in ["CK45", "RVS 304"]:
         recs = [r for r in set_recs.values()
                 if r["material"] == mat and r["slope_um_per_pass"] > 1e-4]
         n_distinct_vc = len({round(r["Vc"], 3) for r in recs})
+
+        # Fall back to literature n if the design is rank-deficient
+        # (single Vc or single data point).
         if len(recs) < 2 or n_distinct_vc < 2:
-            # Cannot fit a slope — fall back to literature n, anchor C on the data.
             n_lit = 0.25 if mat == "CK45" else 0.20
             if recs:
-                r0 = recs[0]
-                T0 = failure_um / r0["slope_um_per_pass"]
-                C = r0["Vc"] * T0 ** n_lit
+                # Median-based anchor (was recs[0] — order-dependent)
+                med_slope = float(np.median([r["slope_um_per_pass"] for r in recs]))
+                med_vc    = float(np.median([r["Vc"] for r in recs]))
+                T0 = failure_um / med_slope
+                C  = med_vc * T0 ** n_lit
             else:
                 C = float("nan")
             constants[mat] = {"n": n_lit, "C": round(float(C), 4),
@@ -203,18 +219,40 @@ def fit_taylor_constants(set_recs: Dict[int, dict], failure_um: float,
                               "n_distinct_vc": n_distinct_vc, "source": "literature_n"}
             if verbose:
                 print(f"  [{mat}] only {n_distinct_vc} distinct Vc among {len(recs)} sets"
-                      f" -> using literature n={n_lit}, C anchored on data.")
+                      f" -> using literature n={n_lit}, C anchored on median(Vc,k).")
             continue
+
         logV = np.array([np.log(r["Vc"]) for r in recs])
-        logk = np.array([np.log(r["slope_um_per_pass"]) for r in recs])
-        A = np.column_stack([np.ones(len(logk)), logk])
-        (a, n), *_ = np.linalg.lstsq(A, logV, rcond=None)
-        # C from intercept: a = log C − n·log W_f  ⇒  C = exp(a + n·log W_f)
-        C = float(np.exp(a + n * np.log(failure_um)))
-        pred = A @ np.array([a, n])
-        ss_res = float(np.sum((logV - pred) ** 2))
-        ss_tot = float(np.sum((logV - logV.mean()) ** 2))
+        logT = np.array([np.log(failure_um / r["slope_um_per_pass"]) for r in recs])
+        A = np.column_stack([np.ones(len(logV)), logV])
+        (a_int, b_slp), *_ = np.linalg.lstsq(A, logT, rcond=None)
+
+        if b_slp >= -1e-9:
+            # Non-physical: tool life increases (or is flat) with cutting speed.
+            # Fall back to literature n rather than emit a nonsense exponent.
+            n_lit = 0.25 if mat == "CK45" else 0.20
+            med_slope = float(np.median([r["slope_um_per_pass"] for r in recs]))
+            med_vc    = float(np.median([r["Vc"] for r in recs]))
+            C = med_vc * (failure_um / med_slope) ** n_lit
+            constants[mat] = {"n": n_lit, "C": round(float(C), 4),
+                              "r2": None, "n_sets": len(recs),
+                              "n_distinct_vc": n_distinct_vc,
+                              "source": "literature_n",
+                              "note": f"regression slope b={b_slp:.4f} >= 0 (non-physical)"}
+            if verbose:
+                print(f"  [{mat}] regression slope b={b_slp:.4f} >= 0 (T increases with V) "
+                      f"-> using literature n={n_lit}.")
+            continue
+
+        n = -1.0 / b_slp
+        log_C = a_int * n
+        C = float(np.exp(log_C))
+
+        pred   = A @ np.array([a_int, b_slp])
+        ss_res = float(np.sum((logT - pred) ** 2))
+        ss_tot = float(np.sum((logT - logT.mean()) ** 2))
         r2 = 1 - ss_res / ss_tot if ss_tot > 1e-12 else None
+
         constants[mat] = {"n": round(float(n), 6), "C": round(float(C), 4),
                           "r2": round(r2, 4) if r2 is not None else None,
                           "n_sets": len(recs), "n_distinct_vc": n_distinct_vc,
@@ -241,16 +279,34 @@ def main() -> None:
     set_recs  = fit_set_trajectories(df, sets, args.train_sets)
     constants = fit_taylor_constants(set_recs, args.failure_um)
 
-    # Add Taylor-predicted life/slope per set for the optional physics-slope mode
+    # Add Taylor-predicted life / slope / re-anchored intercept per set for
+    # the optional physics-slope mode. The intercept is re-fit with the
+    # Taylor slope FIXED, so the line stays a valid trajectory through the
+    # mid-life window (previously it kept the observed-slope intercept and
+    # could drift far from the data when the slopes differed).
     for s, r in set_recs.items():
         c = constants.get(r["material"])
         if c and c["C"] and np.isfinite(c["C"]):
-            T_taylor = (c["C"] / r["Vc"]) ** (1.0 / c["n"])      # passes
-            r["T_taylor"] = float(T_taylor)
-            r["taylor_slope_um_per_pass"] = float(args.failure_um / T_taylor)
+            T_taylor     = (c["C"] / r["Vc"]) ** (1.0 / c["n"])     # passes
+            taylor_slope = float(args.failure_um / T_taylor)
+
+            g = df[df["Set"] == s].sort_values("ImageID")
+            t = g["ImageID"].to_numpy(float)
+            w = g["wear"].to_numpy(float)
+            t_max = float(t.max())
+            lo, hi = WINDOW_LO * t_max, WINDOW_HI * t_max
+            m = (t >= lo) & (t <= hi)
+            tw, ww = (t[m], w[m]) if m.sum() >= 3 else (t, w)
+            # Theil–Sen-style intercept with slope fixed: median residual.
+            taylor_intercept = float(np.median(ww - taylor_slope * tw))
+
+            r["T_taylor"]                  = float(T_taylor)
+            r["taylor_slope_um_per_pass"]  = taylor_slope
+            r["taylor_intercept_um"]       = taylor_intercept
         else:
-            r["T_taylor"] = None
-            r["taylor_slope_um_per_pass"] = None
+            r["T_taylor"]                  = None
+            r["taylor_slope_um_per_pass"]  = None
+            r["taylor_intercept_um"]       = None
 
     payload = {
         "meta": {

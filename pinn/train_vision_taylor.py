@@ -161,11 +161,9 @@ def run(cfg: Stage3Config, args, device, out_dir: Path) -> dict:
 
     data_criterion = nn.MSELoss() if cfg.data_loss == "mse" else nn.L1Loss()
     physics_loss = TaylorPhysicsLoss(
-        constants_path=args.constants, lambda_max=max(args.lambda_max, 1e-9),
+        constants_path=args.constants, lambda_max=args.lambda_max,
         warmup_epochs=args.warmup, apply_to=args.apply_to,
         one_sided=args.one_sided, use_taylor_slope=args.use_taylor_slope)
-    if args.lambda_max <= 0.0:                     # lambda 0 == pure vision control
-        physics_loss.lambda_max = 0.0
     print(f"  PhysicsLoss: {physics_loss.extra_repr()}")
     eval_crit = nn.L1Loss()                        # eval loss is reported in MAE anyway
 
