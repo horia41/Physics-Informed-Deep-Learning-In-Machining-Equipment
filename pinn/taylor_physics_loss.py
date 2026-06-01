@@ -114,8 +114,25 @@ class TaylorPhysicsLoss(nn.Module):
             if rec is None or s in PHYSICS_EXCLUDED_SETS:        continue
             if not self._material_ok(mat):                      continue
             if not (rec["window_lo_id"] <= t <= rec["window_hi_id"]):  continue
-            slope = rec["taylor_slope_um_per_pass"] if (self.use_taylor_slope
-                    and rec.get("taylor_slope_um_per_pass")) else rec["slope_um_per_pass"]
+            if self.use_taylor_slope and rec.get("taylor_slope_um_per_pass"):
+                # Pulls the pre-calculated extended slope directly from the fresh JSON file
+                slope = rec["taylor_slope_um_per_pass"]
+            elif self.use_taylor_slope:
+                # --- MODIFIED: Live multi-variable backup calculator ---
+                # Extracts the multi-variable exponents dynamically if not found in the record
+                n_val = self.constants.get(mat, {}).get("n", 0.25)
+                m_val = self.constants.get(mat, {}).get("m", 0.0)
+                C_val = self.constants.get(mat, {}).get("C", 300.0)
+                
+                vc = rec.get("Vc", 174.0)
+                fz = rec.get("fz", 0.05)
+                
+                log_T = (np.log(C_val) - np.log(vc) - m_val * np.log(fz)) / n_val
+                t_life = np.exp(log_T)
+                slope = self.failure_um / t_life
+            else:
+                slope = rec["slope_um_per_pass"]
+
             vb = slope * t + rec["intercept_um"]
             vb = min(max(vb, 0.0), self.failure_um)
             idxs.append(i)

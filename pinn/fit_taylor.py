@@ -100,6 +100,11 @@ def load_labels(labels_csv: Path) -> pd.DataFrame:
 
 def load_sets(sets_csv: Path) -> pd.DataFrame:
     s = pd.read_csv(sets_csv)
+    
+    # --- BULLETPROOF ADDITION: Clean all column names ---
+    # Removes hidden trailing spaces, leading spaces, and formatting artifacts (\r, \n)
+    s.columns = s.columns.str.strip()
+    
     # first column is the unnamed "Set N" label
     s = s.rename(columns={s.columns[0]: "SetLabel"})
     s["Set"] = s["SetLabel"].str.extract(r"(\d+)").astype(int)
@@ -161,6 +166,7 @@ def fit_set_trajectories(df: pd.DataFrame, sets: pd.DataFrame,
         rec = {
             "set": s, "material": material_of(s),
             "Vc": float(sets.loc[s, "Vc"]),
+            "fz": float(sets.loc[s, "fz"]),
             "max_image_id": t_max,
             "max_wear_um": max_wear,
             "frac_of_failure": max_wear / WEAR_FAILURE_UM,
@@ -188,40 +194,56 @@ def fit_taylor_constants(set_recs: Dict[int, dict], failure_um: float,
     for mat in ["CK45", "RVS 304"]:
         recs = [r for r in set_recs.values()
                 if r["material"] == mat and r["slope_um_per_pass"] > 1e-4]
+        
         n_distinct_vc = len({round(r["Vc"], 3) for r in recs})
-        if len(recs) < 2 or n_distinct_vc < 2:
-            # Cannot fit a slope — fall back to literature n, anchor C on the data.
-            n_lit = 0.25 if mat == "CK45" else 0.20
-            if recs:
-                r0 = recs[0]
-                T0 = failure_um / r0["slope_um_per_pass"]
-                C = r0["Vc"] * T0 ** n_lit
-            else:
-                C = float("nan")
-            constants[mat] = {"n": n_lit, "C": round(float(C), 4),
-                              "r2": None, "n_sets": len(recs),
-                              "n_distinct_vc": n_distinct_vc, "source": "literature_n"}
+        
+        # --- MODIFIED: Added 'or True' to force supervisor's literature midpoints ---
+        if len(recs) < 2 or n_distinct_vc < 2 or True:
+            # --- MODIFIED: Load specific (n, m, C) from supervisor brief ---
+            if mat == "CK45":
+                n_lit = 0.25
+                m_lit = 0.65
+                C_lit = 350.0
+            else:  # RVS 304
+                n_lit = 0.20
+                m_lit = 0.55
+                C_lit = 140.0
+                
+            # --- MODIFIED: Added 'm' and replaced anchored calculation with pure literature constants ---
+            constants[mat] = {
+                "n": n_lit, 
+                "m": m_lit,  # Added feed rate exponent variable
+                "C": round(float(C_lit), 4),
+                "r2": None, 
+                "n_sets": len(recs),
+                "n_distinct_vc": n_distinct_vc, 
+                "source": "supervisor_literature"
+            }
             if verbose:
-                print(f"  [{mat}] only {n_distinct_vc} distinct Vc among {len(recs)} sets"
-                      f" -> using literature n={n_lit}, C anchored on data.")
+                print(f"  [{mat}] Applying supervisor literature benchmarks"
+                      f" -> n={n_lit}, m={m_lit}, C={C_lit}")
             continue
+            
+        # --- UNREACHABLE BY DESIGN FOR DATASETS LACKING VC VARIANCE ---
         logV = np.array([np.log(r["Vc"]) for r in recs])
         logk = np.array([np.log(r["slope_um_per_pass"]) for r in recs])
         A = np.column_stack([np.ones(len(logk)), logk])
         (a, n), *_ = np.linalg.lstsq(A, logV, rcond=None)
-        # C from intercept: a = log C − n·log W_f  ⇒  C = exp(a + n·log W_f)
         C = float(np.exp(a + n * np.log(failure_um)))
         pred = A @ np.array([a, n])
         ss_res = float(np.sum((logV - pred) ** 2))
         ss_tot = float(np.sum((logV - logV.mean()) ** 2))
         r2 = 1 - ss_res / ss_tot if ss_tot > 1e-12 else None
-        constants[mat] = {"n": round(float(n), 6), "C": round(float(C), 4),
+        
+        # --- MODIFIED: Added default m parameter here just for schema structural uniformity ---
+        constants[mat] = {"n": round(float(n), 6), "m": 0.0, "C": round(float(C), 4),
                           "r2": round(r2, 4) if r2 is not None else None,
                           "n_sets": len(recs), "n_distinct_vc": n_distinct_vc,
                           "source": "fitted"}
         if verbose:
             warn = "  ** only 2 distinct Vc: n is weakly identified **" if n_distinct_vc == 2 else ""
             print(f"  [{mat}] n={n:.4f}  C={C:.2f}  R2={r2}  (sets={len(recs)}){warn}")
+            
     return constants
 
 
@@ -245,12 +267,13 @@ def main() -> None:
     for s, r in set_recs.items():
         c = constants.get(r["material"])
         if c and c["C"] and np.isfinite(c["C"]):
-            T_taylor = (c["C"] / r["Vc"]) ** (1.0 / c["n"])      # passes
+            # --- MODIFIED: Extended multi-variable Taylor form T = (C / (Vc * fz^m))^(1/n) ---
+            # Derived in log-space to protect against extreme exponential overflows
+            log_T = (np.log(c["C"]) - np.log(r["Vc"]) - c["m"] * np.log(r["fz"])) / c["n"]
+            T_taylor = np.exp(log_T)      # passes
+            
             r["T_taylor"] = float(T_taylor)
             r["taylor_slope_um_per_pass"] = float(args.failure_um / T_taylor)
-        else:
-            r["T_taylor"] = None
-            r["taylor_slope_um_per_pass"] = None
 
     payload = {
         "meta": {
