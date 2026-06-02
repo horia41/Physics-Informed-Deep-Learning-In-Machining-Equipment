@@ -67,15 +67,19 @@ predictions_to_um    = _TVS.predictions_to_um
 fmt_metrics          = _TVS.fmt_metrics
 set_seed             = _TVS.set_seed
 resolve_device       = _TVS.resolve_device
-ALL_EXPERIMENTS      = _TVS.ALL_EXPERIMENTS
+# The fusion trainer exposes its experiment grid as DEFAULT_EXPERIMENTS.
+# (Older drafts referenced ALL_EXPERIMENTS / a gated-fusion variant that does
+# not exist in this repo; kept a fallback so either name works.)
+DEFAULT_EXPERIMENTS  = getattr(_TVS, "DEFAULT_EXPERIMENTS",
+                               getattr(_TVS, "ALL_EXPERIMENTS", []))
 TaylorPhysicsLoss    = _TPL.TaylorPhysicsLoss
 
 
 def _get_base_cfg(name: str):
-    for cfg in ALL_EXPERIMENTS:
+    for cfg in DEFAULT_EXPERIMENTS:
         if cfg.name == name:
             return cfg
-    avail = [c.name for c in ALL_EXPERIMENTS]
+    avail = [c.name for c in DEFAULT_EXPERIMENTS]
     raise SystemExit(f"--base-exp '{name}' not found. Available: {avail}")
 
 
@@ -121,7 +125,8 @@ def train_one_epoch_taylor(model, loader, optimizer, data_criterion, physics_los
 def run(base_cfg, args, device, out_dir: Path, name: str) -> None:
     print(f"\n{'='*80}\n  STAGE 3 FUSION: {name}")
     print(f"  base={base_cfg.name} (fusion={base_cfg.fusion_mode}, "
-          f"features={base_cfg.feature_set}, mdrop={base_cfg.modality_dropout_p})")
+          f"features={base_cfg.feature_set}, "
+          f"gate_aircuts={getattr(base_cfg, 'gate_aircuts', False)})")
     print(f"  physics: lambda_max={args.lambda_max} warmup={args.warmup} "
           f"apply_to={args.apply_to} one_sided={args.one_sided} "
           f"taylor_slope={args.use_taylor_slope}\n{'='*80}")
@@ -140,8 +145,7 @@ def run(base_cfg, args, device, out_dir: Path, name: str) -> None:
                         dropout_backbone=base_cfg.dropout_backbone)
     if base_cfg.use_sensors:
         model_kwargs.update(fusion_mode=base_cfg.fusion_mode, n_sensor_features=n_feat,
-                            sensor_encoder_dim=base_cfg.sensor_encoder_dim,
-                            modality_dropout_p=base_cfg.modality_dropout_p)
+                            sensor_encoder_dim=base_cfg.sensor_encoder_dim)
     model = MATWIMultimodalModel(**model_kwargs).to(device)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=base_cfg.lr,
@@ -160,8 +164,13 @@ def run(base_cfg, args, device, out_dir: Path, name: str) -> None:
                                     physics_loss, device, base_cfg.use_sensors,
                                     epoch0=epoch-1, log_every=args.log_every)
         val = evaluate(model, loaders["val"], data_criterion, device, base_cfg.use_sensors)
+        # gate_mean is only meaningful for gated-fusion models that expose
+        # out["gate"]; the current fusion model does not, so it is nan — omit it.
+        gate_str = (f"gate={tr['gate_mean']:.3f} "
+                    if tr.get("gate_mean") == tr.get("gate_mean")  # not nan
+                    and tr.get("gate_mean") is not None else "")
         print(f"  [{epoch:02d}/{base_cfg.epochs}] data={tr['data_loss']:.5f} "
-              f"phys={tr['phys_loss']:.6f} gate={tr['gate_mean']:.3f} "
+              f"phys={tr['phys_loss']:.6f} {gate_str}"
               f"train_mae={tr['mae_um']:.1f}µm | val {fmt_metrics(val)} ({time.time()-t0:.1f}s)")
         history.append({"epoch": epoch, **{f"train_{k}": v for k, v in tr.items()},
                         "val_mae_overall_um": val["mae_overall_um"],
@@ -196,21 +205,26 @@ def run(base_cfg, args, device, out_dir: Path, name: str) -> None:
 
 
 def main():
-    p = argparse.ArgumentParser(description="MATWI Stage 3: gated fusion + Taylor physics loss.")
+    p = argparse.ArgumentParser(description="MATWI Stage 3: fusion + Taylor physics loss.")
     p.add_argument("--data-dir",   type=Path, required=True)
     p.add_argument("--labels-csv", type=Path, required=True)
     p.add_argument("--sets-csv",   type=Path, required=True)
     p.add_argument("--output-dir", type=Path, required=True)
     p.add_argument("--constants",  type=Path, required=True)
-    p.add_argument("--name",       type=str,  default="t3gated_taylor")
-    p.add_argument("--base-exp",   type=str,  default="t3_gated_top25_md30",
-                   help="config name from train_vision_sensor.py to build on")
+    p.add_argument("--name",       type=str,  default="t3fusion_taylor")
+    p.add_argument("--base-exp",   type=str,  default="intermediate_top25",
+                   help="config name from train_vision_sensor.py DEFAULT_EXPERIMENTS "
+                        "to build on (e.g. intermediate_top25, early_top25)")
     # physics knobs
     p.add_argument("--lambda-max", type=float, default=0.05, help="0 => fusion control, no physics")
     p.add_argument("--warmup",     type=int,   default=4)
     p.add_argument("--apply-to",   type=str,   default="all", choices=["all", "rvs", "ck45"])
     p.add_argument("--one-sided",  action="store_true")
     p.add_argument("--use-taylor-slope", action="store_true")
+    # air-cut gating: compute sensor features on the tool-engaged window only
+    p.add_argument("--gate-aircuts", action="store_true",
+                   help="remove tool-approach/retraction (air-cut) phases before "
+                        "sensor feature extraction (uses relative band energy)")
     # misc
     p.add_argument("--num-workers", type=int, default=4)
     p.add_argument("--seed",        type=int, default=42)
@@ -222,8 +236,13 @@ def main():
     args.output_dir.mkdir(parents=True, exist_ok=True)
     set_seed(args.seed)
     device = resolve_device(args.device)
-    base_cfg = _get_base_cfg(args.base_exp)
-    print(f"Device {device} | seed {args.seed} | out {args.output_dir.resolve()}")
+    base_cfg = deepcopy(_get_base_cfg(args.base_exp))   # copy: don't mutate the grid
+    # Apply the air-cut flag onto the chosen base config (ExperimentConfig now
+    # carries gate_aircuts; older configs without it still work via setattr).
+    if args.gate_aircuts:
+        setattr(base_cfg, "gate_aircuts", True)
+    print(f"Device {device} | seed {args.seed} | gate_aircuts={args.gate_aircuts} "
+          f"| out {args.output_dir.resolve()}")
     run(base_cfg, args, device, args.output_dir.resolve(), args.name)
 
 

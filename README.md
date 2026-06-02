@@ -98,6 +98,13 @@ project_pinn(or however you named it)/
 │   └── sensor_check.sh            # SLURM job script for Snellius
 │
 ├── pinn/                          # Stage 3 — Taylor physics  (IN PROGRESS)
+│   ├── fit_taylor.py              # Offline: fit Taylor constants (n, C) per material → JSON
+│   ├── taylor_physics_loss.py     # Differentiable Taylor penalty (PyTorch nn.Module)
+│   ├── train_vision_taylor.py     # Vision-only + Taylor physics loss
+│   ├── train_vision_sensor_taylor.py  # Vision+sensor fusion + Taylor (supports air-cut gating)
+│   ├── run_taylor.sh              # SLURM: vision-only physics ablation (array 0–2)
+│   └── run_taylor_fusion.sh       # SLURM: fusion physics × air-cut grid (array 0–4)
+│
 └── runs/                          # All experiment outputs (history, checkpoints, results)
 ```
 ---
@@ -336,6 +343,36 @@ evaluated on the official split **and** leave-one-set-out (LOSO) CV.
    absolute band-energy features were a set-identity leak — now fixed to relative energy.
 5. **Ceiling from two anomalous sets (5, 11):** LOSO pooled stays ~55 µm because those 
    two setups break every model regardless of features or air-cut filtering.
+
+### 5.5 Stage 3 — Taylor physics loss: air-cut integration & bug fixes (NEW)
+
+The Stage-3 Taylor pipeline (`pinn/`) was extended so the fusion variant can train on 
+air-cut-filtered sensor features, and several pre-existing bugs were fixed in the process.
+
+**Air-cut integration:**
+- `train_vision_sensor_taylor.py` gained a `--gate-aircuts` flag. It flows through the 
+  shared `build_loaders` → `MATWIMultimodalDataset(gate_aircuts=True)`, so the Taylor 
+  fusion model trains on the tool-engaged window only, with the length-invariant relative 
+  band-energy features. `base_config` (incl. `gate_aircuts`) is saved in each `results.json`.
+- `run_taylor_fusion.sh` now runs a 5-way grid crossing physics × gating: control, 
+  Taylor-symmetric, Taylor-ceiling-RVS, control+gated, Taylor-symmetric+gated (array 0–4). 
+  Compare task 0 vs 3 for the air-cut effect, 0 vs 1 for the physics effect.
+
+**Bugs found & fixed in `train_vision_sensor_taylor.py`** (it was written against an 
+"improve_attempt" fusion codebase that is not in this repo, so it was fully broken):
+- Referenced `ALL_EXPERIMENTS` — the fusion trainer exports `DEFAULT_EXPERIMENTS` 
+  (crash at import). Fixed with a fallback.
+- Default `--base-exp t3_gated_top25_md30` — no such experiment (crash). Changed to 
+  `intermediate_top25` (best existing fusion config).
+- Referenced `modality_dropout_p` and a gated-fusion model output (`out["gate"]`) that 
+  the current `modelVisionSensor.py` does not have. Removed / guarded.
+- The SLURM script pointed at a hard-coded foreign user path and the nonexistent base-exp.
+
+**Not changed (by design):** `taylor_physics_loss.py` and `fit_taylor.py` operate on model 
+*predictions* and *cutting parameters*, never on sensor features — so air-cut filtering does 
+not touch them. (Separately, those two files had their own earlier round of bug fixes: 
+Taylor regression direction, dead `window` override, Taylor-slope/intercept mismatch, 
+relaxed `lambda_max` assert, and a vectorised loss forward pass.)
 
 ---
 
