@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Gather results from all sensor fusion ablation experiments into a comparison table.
 Run this after all SLURM jobs have finished.

@@ -1,0 +1,56 @@
+{
+  "experiment": "t3gated_taylor_ceil_l0.5_e17_s44",
+  "base_config": {
+    "name": "t3_gated_top25_md30",
+    "fusion_mode": "gated",
+    "feature_set": "top25",
+    "use_sensors": true,
+    "modality_dropout_p": 0.3,
+    "set_range": "1-13",
+    "image_size": [
+      384,
+      384
+    ],
+    "epochs": 17,
+    "lr": 0.0003,
+    "normalisation": "dataset",
+    "loss": "MSE",
+    "weight_decay": 0.0001,
+    "batch_size": 32,
+    "sensor_encoder_dim": 64,
+    "dropout_backbone": 0.3
+  },
+  "physics": {
+    "lambda_max": 0.5,
+    "warmup": 2,
+    "apply_to": "all",
+    "one_sided": true,
+    "use_taylor_slope": false
+  },
+  "best_epoch": 15,
+  "best_val_mae_um": 52.14646530151367,
+  "splits": {
+    "val": {
+      "mae_overall_um": 52.14646530151367,
+      "n_total": 300,
+      "mae_flank_wear_um": 46.46341323852539,
+      "n_flank_wear": 170,
+      "mae_adhesion_um": 20.29080581665039,
+      "n_adhesion": 7,
+      "mae_flank_wear+adhesion_um": 61.81401824951172,
+      "n_flank_wear+adhesion": 123,
+      "loss": 0.006675312174484134
+    },
+    "test": {
+      "mae_overall_um": 23.49567413330078,
+      "n_total": 247,
+      "mae_flank_wear_um": 19.821584701538086,
+      "n_flank_wear": 188,
+      "mae_adhesion_um": 38.37472152709961,
+      "n_adhesion": 15,
+      "mae_flank_wear+adhesion_um": 34.12165832519531,
+      "n_flank_wear+adhesion": 44,
+      "loss": 0.001026067957244361
+    }
+  }
+}

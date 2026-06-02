@@ -1,0 +1,48 @@
+=== 5 | vis_taylor_sym_l0.05_tslope_e17_s44 ===
+Device cuda | seed 44 | out /gpfs/scratch1/shared/hionescu/project_pinn/pinnV3/runs/confirm/stage3_vision
+
+================================================================================
+  STAGE 3: vis_taylor_sym_l0.05_tslope_e17_s44  (backbone=efficientnetv2_s, data_loss=mse)
+  physics: lambda_max=0.05 warmup=2 apply_to=all one_sided=False taylor_slope=True
+================================================================================
+[MATWIVisionDataset] split=train | set_range=1-13 | norm=dataset | augment=False | n_samples=664 | wear_cap=450.0µm | impute_zero=False
+[MATWIVisionDataset] split=val | set_range=1-13 | norm=dataset | augment=False | n_samples=301 | wear_cap=450.0µm | impute_zero=False
+[MATWIVisionDataset] split=test | set_range=1-13 | norm=dataset | augment=False | n_samples=254 | wear_cap=450.0µm | impute_zero=False
+[MATWIVisionDataset] split=unseen | set_range=1-13 | norm=dataset | augment=False | n_samples=0 | wear_cap=450.0µm | impute_zero=False
+  [warn] split='unseen' empty, skipping.
+  Loaders: train: 664  |  val: 301  |  test: 254
+[MATWIVisionModel] backbone=efficientnetv2_s | head=simple | feat_dim=1280 | pretrained=True
+  Total params    : 20,178,769
+  Trainable params: 20,178,769
+  PhysicsLoss: [CK45(n=-0.0466,C=30.6723), RVS 304(n=-1.6711,C=4.6445)] lambda_max=0.05 warmup=2 window=(0.15,0.85) apply_to=all one_sided=False taylor_slope=True
+  [01/17] data=0.11354 phys=0.002905 train_mae=155.5µm | val overall=102.68µm  flank=108.24  adh=49.47  f+a=98.46  (n=301) (59.6s)
+    ✓ new best val_mae=102.68µm
+  [02/17] data=0.07938 phys=0.004420 train_mae=126.7µm | val overall=89.80µm  flank=95.37  adh=70.84  f+a=83.33  (n=301) (36.2s)
+    ✓ new best val_mae=89.80µm
+  [03/17] data=0.03087 phys=0.001569 train_mae=97.1µm | val overall=68.05µm  flank=69.34  adh=39.88  f+a=68.10  (n=301) (33.6s)
+    ✓ new best val_mae=68.05µm
+  [04/17] data=0.00696 phys=0.000601 train_mae=57.9µm | val overall=45.16µm  flank=41.02  adh=13.03  f+a=52.98  (n=301) (34.2s)
+    ✓ new best val_mae=45.16µm
+  [05/17] data=0.00344 phys=0.000463 train_mae=42.1µm | val overall=41.32µm  flank=38.69  adh=40.93  f+a=45.00  (n=301) (38.8s)
+    ✓ new best val_mae=41.32µm
+  [06/17] data=0.00250 phys=0.000444 train_mae=37.0µm | val overall=43.82µm  flank=41.27  adh=42.00  f+a=47.46  (n=301) (38.6s)
+  [07/17] data=0.00272 phys=0.000386 train_mae=38.0µm | val overall=39.54µm  flank=35.97  adh=15.97  f+a=46.00  (n=301) (38.8s)
+    ✓ new best val_mae=39.54µm
+  [08/17] data=0.00190 phys=0.000373 train_mae=32.3µm | val overall=41.94µm  flank=40.04  adh=32.20  f+a=45.20  (n=301) (38.9s)
+  [09/17] data=0.00164 phys=0.000377 train_mae=30.4µm | val overall=41.38µm  flank=37.53  adh=23.23  f+a=47.89  (n=301) (34.8s)
+  [10/17] data=0.00134 phys=0.000345 train_mae=27.5µm | val overall=39.74µm  flank=36.66  adh=26.04  f+a=44.89  (n=301) (39.2s)
+  [11/17] data=0.00115 phys=0.000377 train_mae=25.9µm | val overall=39.43µm  flank=35.63  adh=24.43  f+a=45.66  (n=301) (38.9s)
+    ✓ new best val_mae=39.43µm
+  [12/17] data=0.00112 phys=0.000344 train_mae=25.6µm | val overall=38.37µm  flank=33.46  adh=15.70  f+a=46.64  (n=301) (34.2s)
+    ✓ new best val_mae=38.37µm
+  [13/17] data=0.00094 phys=0.000395 train_mae=23.5µm | val overall=40.59µm  flank=36.46  adh=26.13  f+a=47.23  (n=301) (37.7s)
+  [14/17] data=0.00088 phys=0.000340 train_mae=23.2µm | val overall=39.94µm  flank=35.00  adh=24.43  f+a=47.79  (n=301) (34.3s)
+  [15/17] data=0.00087 phys=0.000310 train_mae=22.5µm | val overall=38.28µm  flank=33.14  adh=18.17  f+a=46.69  (n=301) (39.0s)
+    ✓ new best val_mae=38.28µm
+  [16/17] data=0.00090 phys=0.000399 train_mae=23.0µm | val overall=38.78µm  flank=33.79  adh=22.28  f+a=46.75  (n=301) (37.3s)
+  [17/17] data=0.00083 phys=0.000372 train_mae=21.6µm | val overall=39.08µm  flank=33.77  adh=22.16  f+a=47.52  (n=301) (34.8s)
+
+  --- Final results: vis_taylor_sym_l0.05_tslope_e17_s44 (best epoch 15) ---
+  [val    ] overall=38.28µm  flank=33.14  adh=18.17  f+a=46.69  (n=301)
+  [test   ] overall=20.67µm  flank=18.63  adh=37.57  f+a=23.72  (n=254)
+done: vis_taylor_sym_l0.05_tslope_e17_s44

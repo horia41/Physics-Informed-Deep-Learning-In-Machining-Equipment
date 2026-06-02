@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=sensor_fusion
-#SBATCH --partition=gpu
+#SBATCH --partition=gpu_h100
 #SBATCH --gpus=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
