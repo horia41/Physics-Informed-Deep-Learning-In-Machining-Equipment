@@ -352,6 +352,218 @@ def get_v2_feature_dim() -> int:
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# Tier 4 — In-cut filtering (v3 features)
+# ═════════════════════════════════════════════════════════════════════════════
+#
+# Each ~50–60 sec sensor recording starts with the tool approaching the
+# workpiece (no contact) and ends with it retracting (no contact). The
+# middle 55–70% is actual cutting. Empirically across sets 2/5/7/8/11/13
+# the "air-cut" fraction is 28–45% — Set 13 (RVS304) is worst at ~45%.
+#
+# Computing features over the full CSV dilutes magnitude features by the
+# air-cut fraction and corrupts spectral / windowed-trend features (the
+# first and last segments are pure silence). Filtering to in-cut samples
+# before extraction sharpens every feature the LGBM model relies on.
+#
+# Detection: rolling std of acoustic AND accelerometer envelopes; threshold
+# at a fraction of each channel's max. Combined AND-style for robustness:
+# both channels must register cutting activity. Safety net falls back to
+# the full signal if too few samples survive.
+
+DEFAULT_IN_CUT_THR  = 0.30   # fraction of envelope max
+DEFAULT_IN_CUT_WIN  = 100    # rolling-window samples (~60 ms at 1666 Hz)
+MIN_IN_CUT_SAMPLES  = 500    # below this, fall back to full signal
+
+
+def in_cut_mask(
+    df:         pd.DataFrame,
+    thr_frac:   float = DEFAULT_IN_CUT_THR,
+    win:        int   = DEFAULT_IN_CUT_WIN,
+    min_samples: int  = MIN_IN_CUT_SAMPLES,
+) -> np.ndarray:
+    """
+    Boolean mask (len(df),) marking samples where the tool is engaged.
+
+    Uses rolling std on both acoustic and accelerometer channels, threshold
+    at `thr_frac · envelope_max` per channel, then AND. Falls back to all-True
+    if (a) either channel is silent, or (b) fewer than `min_samples` survive
+    (avoids catastrophic feature loss on degenerate recordings).
+    """
+    n = len(df)
+    if n == 0:
+        return np.zeros(0, dtype=bool)
+
+    aco = df["acoustic"].astype(np.float64).to_numpy()
+    acc = df["acc"].astype(np.float64).to_numpy()
+
+    aco_env = pd.Series(aco).rolling(win, min_periods=1).std().to_numpy()
+    acc_env = pd.Series(acc).rolling(win, min_periods=1).std().to_numpy()
+    # Rolling std with min_periods=1 → first value is NaN (single-sample std);
+    # treat NaN as 0 (definitely not in cut at the boundary).
+    aco_env = np.nan_to_num(aco_env, nan=0.0)
+    acc_env = np.nan_to_num(acc_env, nan=0.0)
+
+    aco_max = float(aco_env.max()) if aco_env.size else 0.0
+    acc_max = float(acc_env.max()) if acc_env.size else 0.0
+
+    in_aco = (aco_env > thr_frac * aco_max) if aco_max > 1e-9 else np.ones(n, dtype=bool)
+    in_acc = (acc_env > thr_frac * acc_max) if acc_max > 1e-9 else np.ones(n, dtype=bool)
+    mask = in_aco & in_acc
+
+    if mask.sum() < min_samples:
+        # Safety: not enough survived — likely a recording where the
+        # envelope is too flat to discriminate. Use everything.
+        return np.ones(n, dtype=bool)
+    return mask
+
+
+def extract_features_v3(sensor_path: Path) -> tuple[np.ndarray, float]:
+    """
+    Same 85 features as v2, but computed over IN-CUT samples only.
+
+    Returns (features, in_cut_fraction) where in_cut_fraction ∈ [0, 1]
+    is the fraction of the original recording kept after filtering.
+    Returns zeros on load failure.
+    """
+    dim = get_v2_feature_dim()
+    try:
+        df = pd.read_csv(
+            sensor_path, header=None, usecols=[0, 1, 2, 3, 4],
+            dtype=np.float32, low_memory=False,
+        )
+        df.columns = SENSOR_CHANNELS
+    except Exception as e:
+        warnings.warn(f"Could not load sensor file {sensor_path}: {e}")
+        return np.zeros(dim, dtype=np.float32), 0.0
+
+    mask = in_cut_mask(df)
+    keep_frac = float(mask.mean())
+    df_cut = df.iloc[mask].reset_index(drop=True)
+
+    feats: list[float] = []
+    for ch in SENSOR_CHANNELS:
+        sig = df_cut[ch].values.astype(np.float64)
+        feats.extend(_channel_features(sig, SENSOR_FS))
+
+    Fx = df_cut["Fx"].values.astype(np.float64)
+    Fy = df_cut["Fy"].values.astype(np.float64)
+    Fz = df_cut["Fz"].values.astype(np.float64)
+    F_res = np.sqrt(Fx ** 2 + Fy ** 2 + Fz ** 2)
+    fres_mean = float(F_res.mean())
+    fres_std  = float(F_res.std())
+    fres_mr, fres_sr, fres_sl, fres_ic = _windowed_rms_trend(F_res, N_WINDOWS)
+    feats.extend([fres_mean, fres_std, fres_mr, fres_sr, fres_sl, fres_ic])
+
+    fxfy = float(np.mean(np.abs(Fx) / (np.abs(Fy) + 1e-6)))
+    feats.append(fxfy)
+    for F in (Fx, Fy, Fz):
+        feats.append(float(F.std() / (abs(F.mean()) + 1e-6)))
+
+    return np.array(feats, dtype=np.float32), keep_frac
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Tier 5 — Per-cutting-pass features (v4)
+# ═════════════════════════════════════════════════════════════════════════════
+#
+# v3 concatenates all in-cut samples into one signal, which creates artificial
+# discontinuities at the boundaries between cutting passes. Those jumps corrupt
+# the FFT (spectral leakage) and the windowed-RMS trend (the trend fit jumps
+# across pass boundaries). v4 instead detects each contiguous cutting SEGMENT,
+# extracts the full 85-feature vector PER segment, and length-weighted-averages
+# the feature vectors across segments. This:
+#   • removes air cuts (like v3), AND
+#   • computes spectral / windowed-trend features on clean single-pass signals,
+#     which changes the rank order of those features (so a tree model can
+#     actually benefit, unlike the monotonic rescaling v3 produced).
+# Same 85-dim layout as v2/v3, so it is drop-in for the delta + method machinery.
+
+MIN_SEGMENT_SAMPLES = 1000   # ignore segments shorter than ~0.6 s
+
+
+def find_cut_segments(
+    df:          pd.DataFrame,
+    thr_frac:    float = DEFAULT_IN_CUT_THR,
+    win:         int   = DEFAULT_IN_CUT_WIN,
+    min_seg:     int   = MIN_SEGMENT_SAMPLES,
+) -> list[tuple[int, int]]:
+    """
+    Return a list of (start, end) index pairs for contiguous in-cut segments
+    (each at least `min_seg` samples long). Uses the same envelope detector as
+    in_cut_mask. Falls back to a single full-signal segment if none qualify.
+    """
+    mask = in_cut_mask(df, thr_frac=thr_frac, win=win, min_samples=1)
+    n = len(mask)
+    segments: list[tuple[int, int]] = []
+    i = 0
+    while i < n:
+        if mask[i]:
+            j = i
+            while j < n and mask[j]:
+                j += 1
+            if (j - i) >= min_seg:
+                segments.append((i, j))
+            i = j
+        else:
+            i += 1
+    if not segments:
+        segments = [(0, n)]   # safety: never return empty
+    return segments
+
+
+def extract_features_v4(sensor_path: Path) -> tuple[np.ndarray, int]:
+    """
+    Per-cutting-pass features: extract the 85-dim v2 feature vector on EACH
+    contiguous cutting segment, then length-weighted-average across segments.
+
+    Returns (features, n_segments). Returns zeros on load failure.
+    """
+    dim = get_v2_feature_dim()
+    try:
+        df = pd.read_csv(
+            sensor_path, header=None, usecols=[0, 1, 2, 3, 4],
+            dtype=np.float32, low_memory=False,
+        )
+        df.columns = SENSOR_CHANNELS
+    except Exception as e:
+        warnings.warn(f"Could not load sensor file {sensor_path}: {e}")
+        return np.zeros(dim, dtype=np.float32), 0
+
+    segments = find_cut_segments(df)
+
+    seg_feats:  list[np.ndarray] = []
+    seg_weights: list[float] = []
+    for (a, b) in segments:
+        seg = df.iloc[a:b].reset_index(drop=True)
+        if len(seg) < 4:
+            continue
+        feats: list[float] = []
+        for ch in SENSOR_CHANNELS:
+            sig = seg[ch].values.astype(np.float64)
+            feats.extend(_channel_features(sig, SENSOR_FS))
+        Fx = seg["Fx"].values.astype(np.float64)
+        Fy = seg["Fy"].values.astype(np.float64)
+        Fz = seg["Fz"].values.astype(np.float64)
+        F_res = np.sqrt(Fx ** 2 + Fy ** 2 + Fz ** 2)
+        fres_mr, fres_sr, fres_sl, fres_ic = _windowed_rms_trend(F_res, N_WINDOWS)
+        feats.extend([float(F_res.mean()), float(F_res.std()),
+                      fres_mr, fres_sr, fres_sl, fres_ic])
+        feats.append(float(np.mean(np.abs(Fx) / (np.abs(Fy) + 1e-6))))
+        for F in (Fx, Fy, Fz):
+            feats.append(float(F.std() / (abs(F.mean()) + 1e-6)))
+        seg_feats.append(np.array(feats, dtype=np.float64))
+        seg_weights.append(float(b - a))
+
+    if not seg_feats:
+        return np.zeros(dim, dtype=np.float32), 0
+
+    W = np.array(seg_weights)
+    F = np.vstack(seg_feats)
+    avg = (F * W[:, None]).sum(axis=0) / W.sum()
+    return avg.astype(np.float32), len(seg_feats)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # Tier 2 — Per-set delta (wear-relative features)
 # ═════════════════════════════════════════════════════════════════════════════
 
@@ -579,6 +791,94 @@ def extract_all_features(
     return X_v1, X_v2
 
 
+def extract_v3_features(
+    df:        pd.DataFrame,
+    data_dir:  Path,
+    cache_npz: Optional[Path] = None,
+    force:     bool = False,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Extract v3 (in-cut-filtered) features for every row of df.
+
+    Returns (X_v3, in_cut_frac):
+        X_v3         shape (N, get_v2_feature_dim())
+        in_cut_frac  shape (N,) — fraction of each CSV kept after filtering
+    """
+    dim = get_v2_feature_dim()
+    if cache_npz is not None and cache_npz.exists() and not force:
+        print(f"\n[cache] Loading v3 features from {cache_npz}")
+        npz = np.load(cache_npz)
+        if npz["X_v3"].shape[0] == len(df):
+            return npz["X_v3"], npz["in_cut_frac"]
+        print(f"[cache] v3 sample count mismatch ({npz['X_v3'].shape[0]} vs "
+              f"{len(df)}) — re-extracting.")
+
+    n = len(df)
+    print(f"\n[extract-v3] Building in-cut-filtered features for {n} samples...")
+    t0 = time.time()
+
+    X_v3 = np.zeros((n, dim),  dtype=np.float32)
+    frac = np.zeros(n,         dtype=np.float32)
+    for i in range(n):
+        path = data_dir / str(df.iloc[i]["SensorFile"])
+        X_v3[i], frac[i] = extract_features_v3(path)
+        if (i + 1) % 100 == 0 or i == n - 1:
+            elapsed = time.time() - t0
+            rate    = (i + 1) / max(elapsed, 1e-6)
+            print(f"  v3 {i+1}/{n}  ({elapsed:.1f}s, {rate:.1f}/s)")
+
+    if cache_npz is not None:
+        cache_npz.parent.mkdir(parents=True, exist_ok=True)
+        np.savez(cache_npz, X_v3=X_v3, in_cut_frac=frac)
+        print(f"[cache] Saved v3 features to {cache_npz}")
+
+    return X_v3, frac
+
+
+def extract_v4_features(
+    df:        pd.DataFrame,
+    data_dir:  Path,
+    cache_npz: Optional[Path] = None,
+    force:     bool = False,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Extract v4 (per-cutting-pass, segment-averaged) features for every row.
+
+    Returns (X_v4, n_segments):
+        X_v4        shape (N, get_v2_feature_dim())
+        n_segments  shape (N,) — number of cutting passes detected per CSV
+    """
+    dim = get_v2_feature_dim()
+    if cache_npz is not None and cache_npz.exists() and not force:
+        print(f"\n[cache] Loading v4 features from {cache_npz}")
+        npz = np.load(cache_npz)
+        if npz["X_v4"].shape[0] == len(df):
+            return npz["X_v4"], npz["n_segments"]
+        print(f"[cache] v4 sample count mismatch ({npz['X_v4'].shape[0]} vs "
+              f"{len(df)}) — re-extracting.")
+
+    n = len(df)
+    print(f"\n[extract-v4] Building per-cutting-pass features for {n} samples...")
+    t0 = time.time()
+
+    X_v4 = np.zeros((n, dim), dtype=np.float32)
+    nseg = np.zeros(n,        dtype=np.int32)
+    for i in range(n):
+        path = data_dir / str(df.iloc[i]["SensorFile"])
+        X_v4[i], nseg[i] = extract_features_v4(path)
+        if (i + 1) % 100 == 0 or i == n - 1:
+            elapsed = time.time() - t0
+            rate    = (i + 1) / max(elapsed, 1e-6)
+            print(f"  v4 {i+1}/{n}  ({elapsed:.1f}s, {rate:.1f}/s)")
+
+    if cache_npz is not None:
+        cache_npz.parent.mkdir(parents=True, exist_ok=True)
+        np.savez(cache_npz, X_v4=X_v4, n_segments=nseg)
+        print(f"[cache] Saved v4 features to {cache_npz}")
+
+    return X_v4, nseg
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # Evaluation helpers
 # ═════════════════════════════════════════════════════════════════════════════
@@ -635,21 +935,28 @@ def fit_predict_ridge(
 def fit_predict_lgbm(
     X_train: np.ndarray,
     y_train: np.ndarray,
-    X_val:   np.ndarray,
-    y_val:   np.ndarray,
     X_eval:  np.ndarray,
     seed:    int = 42,
+    es_frac: float = 0.15,
 ) -> tuple[np.ndarray, "lgb.Booster"]:
     """
-    LightGBM regression with early stopping on val MAE.
-    Uses small-data-friendly hyperparams (shallow trees, low LR, regularised).
+    LightGBM regression with early stopping on an IN-DISTRIBUTION slice of the
+    training data. Uses small-data-friendly hyperparams.
+
+    NOTE (bug fix): the previous version early-stopped on the passed val set
+    (sets 3/6/12), which is out-of-distribution (RVS 304) relative to the
+    CK45-heavy train. Val MAE plateaued instantly, so the model stopped after
+    2-7 boosting rounds and never trained — drowning out any feature-quality
+    differences. We now carve a random `es_frac` slice from the training data
+    itself for early stopping, so the stopping signal is in-distribution and
+    the model actually fits.
     """
     params = dict(
         objective         = "regression_l1",
         metric            = "mae",
         learning_rate     = 0.03,
-        num_leaves        = 31,           # was 15 — more capacity (max_depth caps it)
-        max_depth         = 5,            # was 4
+        num_leaves        = 31,
+        max_depth         = 5,
         min_data_in_leaf  = 10,
         feature_fraction  = 0.8,
         bagging_fraction  = 0.8,
@@ -658,14 +965,23 @@ def fit_predict_lgbm(
         verbose           = -1,
         seed              = seed,
     )
-    dtr  = lgb.Dataset(X_train, label=y_train)
-    dval = lgb.Dataset(X_val,   label=y_val, reference=dtr)
+
+    # Carve an in-distribution early-stopping slice from train.
+    n      = len(y_train)
+    rng    = np.random.RandomState(seed)
+    order  = rng.permutation(n)
+    n_es   = max(30, int(es_frac * n))
+    es_idx = order[:n_es]
+    fit_idx = order[n_es:]
+
+    dtr  = lgb.Dataset(X_train[fit_idx], label=y_train[fit_idx])
+    dval = lgb.Dataset(X_train[es_idx],  label=y_train[es_idx], reference=dtr)
     model = lgb.train(
         params,
         dtr,
-        num_boost_round   = 3000,         # was 2000
+        num_boost_round   = 3000,
         valid_sets        = [dval],
-        callbacks         = [lgb.early_stopping(150, verbose=False),   # was 50
+        callbacks         = [lgb.early_stopping(150, verbose=False),
                              lgb.log_evaluation(0)],
     )
     pred = model.predict(X_eval, num_iteration=model.best_iteration)
@@ -722,17 +1038,8 @@ def loso_cv(
         if model_kind == "ridge":
             pred, _, _ = fit_predict_ridge(X_tr, y_tr, X_te)
         elif model_kind == "lgbm":
-            # Carve a tiny val split inside the training fold for early stop
-            rng    = np.random.RandomState(seed + int(s))
-            order  = rng.permutation(len(y_tr))
-            n_val  = max(20, int(0.1 * len(y_tr)))
-            v_idx, t_idx = order[:n_val], order[n_val:]
-            pred, _ = fit_predict_lgbm(
-                X_tr[t_idx], y_tr[t_idx],
-                X_tr[v_idx], y_tr[v_idx],
-                X_te,
-                seed=seed,
-            )
+            # fit_predict_lgbm now carves its own in-distribution ES slice.
+            pred, _ = fit_predict_lgbm(X_tr, y_tr, X_te, seed=seed + int(s))
         else:
             raise ValueError(f"Unknown model_kind={model_kind}")
 
@@ -806,11 +1113,42 @@ def main():
                                       force=args.force_extract)
     print(f"  v1 features: {X_v1.shape}   v2 features: {X_v2.shape}")
 
+    # ── v3 features: same as v2 but computed only on in-cut samples ──────────
+    v3_cache = args.output_dir / f"features_v3_cache_{args.set_range.replace('-','_')}.npz"
+    X_v3, in_cut_frac = extract_v3_features(df, args.data_dir,
+                                            cache_npz=v3_cache,
+                                            force=args.force_extract)
+    print(f"  v3 features: {X_v3.shape}   "
+          f"in-cut keep fraction: mean={in_cut_frac.mean():.1%}  "
+          f"p10={np.percentile(in_cut_frac,10):.1%}  "
+          f"p50={np.percentile(in_cut_frac,50):.1%}  "
+          f"p90={np.percentile(in_cut_frac,90):.1%}")
+    # Per-set breakdown so we can see which sets had the most air cut
+    by_set = pd.DataFrame({"Set": sets, "in_cut_frac": in_cut_frac})
+    set_summary = by_set.groupby("Set")["in_cut_frac"].agg(["mean", "min", "max"])
+    print("  in-cut fraction by set (sample mean / min / max):")
+    for s, row in set_summary.iterrows():
+        print(f"    Set {int(s):>2}:  mean={row['mean']:.1%}  "
+              f"min={row['min']:.1%}  max={row['max']:.1%}")
+
+    # ── v4 features: per-cutting-pass extraction, segment-averaged ───────────
+    v4_cache = args.output_dir / f"features_v4_cache_{args.set_range.replace('-','_')}.npz"
+    X_v4, n_segments = extract_v4_features(df, args.data_dir,
+                                           cache_npz=v4_cache,
+                                           force=args.force_extract)
+    print(f"  v4 features: {X_v4.shape}   "
+          f"segments/CSV: mean={n_segments.mean():.1f}  "
+          f"min={int(n_segments.min())}  max={int(n_segments.max())}")
+
     # ── Precompute deltas (using each set's own first K passes) ──────────────
     base_v1 = compute_set_baselines(X_v1, sets, sensor_ids)
     base_v2 = compute_set_baselines(X_v2, sets, sensor_ids)
+    base_v3 = compute_set_baselines(X_v3, sets, sensor_ids)
+    base_v4 = compute_set_baselines(X_v4, sets, sensor_ids)
     X_v1_d  = apply_delta(X_v1, sets, base_v1)
     X_v2_d  = apply_delta(X_v2, sets, base_v2)
+    X_v3_d  = apply_delta(X_v3, sets, base_v3)
+    X_v4_d  = apply_delta(X_v4, sets, base_v4)
 
     # ── Cutting parameters (per-set Vc, fz, Vf, Ae, Ap, z, material) ─────────
     use_cutting = (not args.no_cutting_params) and args.sets_csv.exists()
@@ -851,16 +1189,27 @@ def main():
         Method("ridge_v1_delta",    X_v1_d, X_v1, "ridge", v1d_names, True),
         Method("ridge_v2_absolute", X_v2,   X_v2, "ridge", v2_names,  False),
         Method("ridge_v2_delta",    X_v2_d, X_v2, "ridge", v2_names,  True),
+        Method("ridge_v3_absolute", X_v3,   X_v3, "ridge", v2_names,  False),
+        Method("ridge_v3_delta",    X_v3_d, X_v3, "ridge", v2_names,  True),
+        Method("ridge_v4_absolute", X_v4,   X_v4, "ridge", v2_names,  False),
+        Method("ridge_v4_delta",    X_v4_d, X_v4, "ridge", v2_names,  True),
     ]
     if _HAS_LGBM:
         methods += [
             Method("lgbm_v2_absolute", X_v2,   X_v2, "lgbm", v2_names, False),
             Method("lgbm_v2_delta",    X_v2_d, X_v2, "lgbm", v2_names, True),
+            Method("lgbm_v3_absolute", X_v3,   X_v3, "lgbm", v2_names, False),
+            Method("lgbm_v3_delta",    X_v3_d, X_v3, "lgbm", v2_names, True),
+            Method("lgbm_v4_absolute", X_v4,   X_v4, "lgbm", v2_names, False),
+            Method("lgbm_v4_delta",    X_v4_d, X_v4, "lgbm", v2_names, True),
         ]
         if use_cutting:
             X_v2_cut   = np.hstack([X_v2, X_cut]).astype(np.float32)
             X_v1v2     = np.hstack([X_v1, X_v2]).astype(np.float32)
             X_v1v2_cut = np.hstack([X_v1, X_v2, X_cut]).astype(np.float32)
+            X_v3_cut   = np.hstack([X_v3, X_cut]).astype(np.float32)
+            X_v2v3     = np.hstack([X_v2, X_v3]).astype(np.float32)
+            X_v4_cut   = np.hstack([X_v4, X_cut]).astype(np.float32)
             methods += [
                 Method("lgbm_v2cut_absolute",   X_v2_cut,   X_v2_cut,
                        "lgbm", v2_names + cut_names, False),
@@ -868,6 +1217,13 @@ def main():
                        "lgbm", v1_names + v2_names, False),
                 Method("lgbm_v1v2cut_absolute", X_v1v2_cut, X_v1v2_cut,
                        "lgbm", v1_names + v2_names + cut_names, False),
+                Method("lgbm_v4cut_absolute",   X_v4_cut,   X_v4_cut,
+                       "lgbm", v2_names + cut_names, False),
+                Method("lgbm_v3cut_absolute",   X_v3_cut,   X_v3_cut,
+                       "lgbm", v2_names + cut_names, False),
+                Method("lgbm_v2v3_absolute",    X_v2v3,     X_v2v3,
+                       "lgbm", [f"v2_{n}" for n in v2_names] +
+                                [f"v3_{n}" for n in v2_names], False),
             ]
     else:
         print("\n[warn] lightgbm not installed — skipping LGBM methods. "
@@ -907,25 +1263,24 @@ def main():
         y_val   = y[va]
 
         if meth.kind == "ridge":
-            pred_train, model, scaler = fit_predict_ridge(
-                X_train, y_train, X_train, alpha=args.ridge_alpha,
-            )
-            _, _, _ = scaler, model, pred_train  # silence linter
-            pred_val,  _, _ = fit_predict_ridge(X_train, y_train, X_val,  alpha=args.ridge_alpha)
-            pred_test, m_r, sc = fit_predict_ridge(X_train, y_train, X_test, alpha=args.ridge_alpha)
+            # Fit once, predict all splits (Ridge has a closed-form fit).
+            _, m_r, scaler = fit_predict_ridge(X_train, y_train, X_train,
+                                               alpha=args.ridge_alpha)
+            col_means = np.nanmean(X_train, axis=0)
+            col_means = np.where(np.isnan(col_means), 0.0, col_means)
+            def _ridge_pred(Xe):
+                Xi = np.where(np.isnan(Xe), col_means, Xe)
+                return m_r.predict(scaler.transform(Xi)).clip(0.0, WEAR_CAP)
+            pred_tr_self = _ridge_pred(X_train)
+            pred_val     = _ridge_pred(X_val)
+            pred_test    = _ridge_pred(X_test)
             coefs = m_r.coef_
         else:
-            pred_val,  _      = fit_predict_lgbm(X_train, y_train, X_val, y_val, X_val,  seed=args.seed)
-            pred_test, m_lgb  = fit_predict_lgbm(X_train, y_train, X_val, y_val, X_test, seed=args.seed)
+            # Train LGBM ONCE (in-distribution early stopping), predict all splits.
+            pred_test, m_lgb = fit_predict_lgbm(X_train, y_train, X_test, seed=args.seed)
+            pred_val     = m_lgb.predict(X_val,   num_iteration=m_lgb.best_iteration).clip(0.0, WEAR_CAP)
+            pred_tr_self = m_lgb.predict(X_train, num_iteration=m_lgb.best_iteration).clip(0.0, WEAR_CAP)
             coefs = m_lgb.feature_importance(importance_type="gain")
-
-        # also predict on train for sanity (gap diagnosis)
-        if meth.kind == "ridge":
-            pred_tr_self, _, _ = fit_predict_ridge(X_train, y_train, X_train,
-                                                   alpha=args.ridge_alpha)
-        else:
-            pred_tr_self, _ = fit_predict_lgbm(X_train, y_train, X_val, y_val, X_train,
-                                               seed=args.seed)
 
         m_train = mae_by_type(y_train, pred_tr_self, types[tr])
         m_val   = mae_by_type(y_val,   pred_val,     types[va])
