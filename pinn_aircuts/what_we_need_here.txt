@@ -1,8 +1,0 @@
-We would like to perform the same experiment as in pinnV2/run_taylorV2_17ep.sh, but with aircuts included
-as you will be provided in the readme.md which specifically targets the aircuts problem.
-
-So, the model to be tested will be the t3_gated_top25_md30, 17 epochs, over 3 seeds, exactly like in the
-.sh file mentioned, but with aircuts.
-
-Put all the files which will handle this in this folder (pinn_aircuts), no matter if you have to copy an entire
-file from somewhere else.
