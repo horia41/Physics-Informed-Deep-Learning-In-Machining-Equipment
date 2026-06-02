@@ -184,7 +184,7 @@ Two model classes are run on every track:
 \begin{itemize}
 \item \textbf{Ridge} regression with per-feature standardisation (scale-sensitive,
     linear, fast, interpretable).
-\item \textbf{LightGBM} gradient-boosted trees with small-data-conservative
+\item \textbf{LightGBM} gradient-boosted trees~\cite{ke2017lightgbm} with small-data-conservative
     hyperparameters (learning rate 0.03, \code{num\_leaves} 31, \code{max\_depth}
     5, \code{min\_data\_in\_leaf} 10, feature/row subsampling 0.8, L2 leaf
     penalty 1.0, L1 objective, early stopping; Section~\ref{sec:bug}).
@@ -246,8 +246,11 @@ LightGBM captures nonlinear feature interactions that Ridge cannot and is
 robust to residual feature-scale differences (tree splits are threshold
 comparisons). Cutting parameters from \code{sets.csv} are appended for the
 \code{*cut*} variants; missing values (Set 1's unknown parameters) are passed
-through natively. The Taylor regression direction and identifiability checks
-that determine these parameters are documented in the Stage-3 code.
+through natively. The implementation uses the core LightGBM Python API
+(\code{lgb.Dataset}, \code{lgb.train}, and \code{lgb.early\_stopping}) documented
+by the LightGBM maintainers~\cite{lightgbm-python-api}. The Taylor regression
+direction and identifiability checks that determine these parameters are
+documented in the Stage-3 code.
 
 \subsection{Tier 4/5 --- air-cut filtering and per-cutting-pass features}
 \label{sec:aircut}
@@ -536,5 +539,22 @@ The residual error is concentrated in two anomalous sets and the
 CK45$\to$RVS\,304 distribution shift, neither of which is reachable by further
 feature engineering. This is a solid reference point for the multimodal-fusion
 comparison and the Stage-3 physics-informed work.
+
+\begin{thebibliography}{9}
+
+\bibitem{ke2017lightgbm}
+Guolin Ke, Qi Meng, Thomas Finley, Taifeng Wang, Wei Chen, Weidong Ma,
+Qiwei Ye, and Tie-Yan Liu.
+\newblock LightGBM: A Highly Efficient Gradient Boosting Decision Tree.
+\newblock In \emph{Advances in Neural Information Processing Systems 30},
+pages 3149--3157, 2017.
+\newblock \url{https://proceedings.neurips.cc/paper_files/paper/2017/hash/6449f44a102fde848669bdd9eb6b76fa-Abstract.html}.
+
+\bibitem{lightgbm-python-api}
+LightGBM developers.
+\newblock LightGBM Python API documentation, version 4.6.0.
+\newblock \url{https://lightgbm.readthedocs.io/en/stable/Python-API.html}.
+
+\end{thebibliography}
 
 \end{document}

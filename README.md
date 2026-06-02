@@ -83,14 +83,21 @@ project_pinn(or however you named it)/
 │   └── run_vision_ablation.sh     # SLURM job script for Snellius
 │
 ├── vision-sensor/                 # Stage 2 — Vision & Sensor 
-│   ├── DatasetClass_VisionSensors.py  # Multimodal Dataset (images + 40 sensor features)
+│   ├── DatasetClass_VisionSensors.py  # Multimodal Dataset (images + 40 sensor features,
+│   │                                  #   now with optional air-cut gating)
 │   ├── modelVisionSensor.py       # Multimodal model (early/intermediate/late fusion)
-│   ├── train_vision_sensor.py     # Sensor fusion training script (10 experiments)
-│   ├── sensor_sanity_check.py     # Ridge regression on sensor features alone
-│   ├── gather_results_sensor.py   # Results aggregator
-│   └── run_sensor_ablation.sh     # SLURM job script for Snellius
+│   ├── train_vision_sensor.py     # Sensor fusion training (10 + 3 air-cut experiments)
+│   ├── gather_results.py          # Results aggregator
+│   └── run_sensor_ablation.sh     # SLURM job script for Snellius (array 0–12)
 │
-├── pinn/                          # Stage 3 — Taylor physics  (TO DO)
+├── sensor-only/                   # Stage 2b — Sensor-only deep dive
+│   ├── sensor_check.py            # v1 baseline: Ridge on 40 hand features (56 µm)
+│   ├── sensor_only_v2.py          # v2 pipeline: richer features, per-set delta,
+│   │                              #   air-cut filtering, per-pass features, LightGBM, LOSO
+│   ├── sensor_only_report.tex     # Full technical write-up (compiles to PDF)
+│   └── sensor_check.sh            # SLURM job script for Snellius
+│
+├── pinn/                          # Stage 3 — Taylor physics  (IN PROGRESS)
 └── runs/                          # All experiment outputs (history, checkpoints, results)
 ```
 ---
@@ -111,13 +118,28 @@ project_pinn(or however you named it)/
 - Additionally loads sensor CSVs and extracts 40 engineered features per sample:
   - 5 channels × 8 features = 40 total
   - Time domain (5 per channel): mean, std, rms, peak-to-peak, kurtosis
-  - Frequency domain (3 per channel): dominant FFT frequency, low-band energy (0–200 Hz), 
-    mid-band energy (200–800 Hz)
+  - Frequency domain (3 per channel): dominant FFT frequency, low-band energy fraction 
+    (0–200 Hz), mid-band energy fraction (200–800 Hz)
 - Sensor features are standardised (zero mean, unit std) using a scaler fitted on 
   training data only
 - Supports 3 feature subsets: `"all40"`, `"raw25"` (time-domain only), `"top25"` 
   (best by Ridge regression importance)
 - Only keeps samples with BOTH modalities → 647 train / 300 val / 247 test
+- **NEW — `gate_aircuts` flag (air-cut removal):** when `True`, sensor features are 
+  computed only on the *tool-engaged* portion of each recording. Each ~50–60 s CSV 
+  begins with the tool approaching the workpiece (no contact) and ends with it retracting; 
+  this "air-cut" silence is 28–46% of every recording (worst on RVS 304). An envelope 
+  detector on the acoustic + accelerometer channels (`in_cut_mask`) trims those phases 
+  before feature extraction. The 40-feature layout is unchanged, so `top25`/`raw25` and 
+  the fusion model are unaffected; the scaler is re-fit on gated features.
+- **Frequency-feature bug fix (required for gating to be valid):** the band-energy 
+  features are now **relative** (`band power / total power`) instead of absolute sums. 
+  Absolute energy scales with signal length — already variable across raw recordings 
+  (78k–99k samples) and *more* variable under gating — which corrupts any length-dependent 
+  feature. Relative band energy is length- and gain-invariant. *(Note: FFT frequencies 
+  themselves are NOT distorted by length — `rfftfreq(n)` recomputes the correct Hz axis, 
+  so a 200 Hz component stays at 200 Hz regardless of `n`; the issue was energy scale, not 
+  bin warping.)*
  
 ### 4.2 Models
  
@@ -265,6 +287,56 @@ dataset class (647 train) for all runs including the vision-only control.
    are set-specific artifacts, not generalizable wear signals.
 6. **The 647→664 gap costs 3.4 µm.** Losing 17 samples matters on this small dataset.
  
+### 5.3.1 Air-cut ablation (NEW)
+
+Each sensor recording is 28–46% "air cut" — the tool approaching and retracting with no 
+material contact. Three gated fusion experiments were added (`intermediate_top25_gated`, 
+`early_top25_gated`, `intermediate_all40_gated`), each identical to its ungated twin except 
+`gate_aircuts=True`. They isolate whether removing air cuts helps fusion. Run them on 
+Snellius via `run_sensor_ablation.sh` (array indices 10–12) and compare `*_gated` against 
+the base name. The frequency-feature bug fix (relative band energy) ships with this change 
+and benefits the ungated runs too. *(Expectation from the sensor-only deep dive (§5.4): 
+air-cut removal sharpens flank/adhesion but can regress flank+adhesion — so the net effect 
+on fusion, whose value is in the hard adhesion cases, is an open question worth measuring.)*
+
+### 5.4 Sensor-Only Deep Dive (`sensor-only/`)
+
+A dedicated investigation of how far a **sensor-only** model can go (no images), to 
+understand the modality before fusing. Full write-up in 
+[`sensor-only/sensor_only_report.tex`](sensor-only/sensor_only_report.tex).
+
+**Pipeline (`sensor_only_v2.py`):** richer dimensionless features (relative spectral 
+bands, robust spread, within-pass windowed-RMS trend, force resultant); per-set "delta" 
+features (subtract each set's unworn-baseline signature); cutting-parameter features; 
+**air-cut filtering** (v3) and **per-cutting-pass** features (v4); both Ridge and LightGBM; 
+evaluated on the official split **and** leave-one-set-out (LOSO) CV.
+
+**Results (test MAE, µm):**
+
+| Method                | Overall | Flank | Adh  | F+A  | Note                              |
+|-----------------------|---------|-------|------|------|-----------------------------------|
+| predict-mean          | 40.9    | 41.0  | 58.8 | 34.6 | trivial floor                     |
+| Ridge on 40 features  | 56.0    | 45.6  | 52.8 | 101  | original baseline (worse than mean)|
+| **LGBM v2 + delta**   | **21.8**| 18.7  | 52.8 | 24.8 | best overall                      |
+| LGBM v3 + delta (in-cut) | 23.2 | **16.6** | **45.3** | 43.9 | **best flank — matches vision** |
+
+**Key findings:**
+1. **A LightGBM early-stopping bug** (stopping on the out-of-distribution val set) was 
+   underfitting every model to 2–7 boosting rounds. Fixing it (early-stop on an 
+   in-distribution train slice) dropped best test MAE from 29.9 → **21.8 µm**, approaching 
+   vision-only (19.0).
+2. **Air-cut removal helps the clean wear types.** It gives the best flank-wear MAE of the 
+   whole project (**16.6 µm, matching the vision model**) and best adhesion, but regresses 
+   on flank+adhesion. Since flank dominates the data, it wins on flank-weighted views.
+3. **Air-cut removal is near-invisible to tree models** on whole-signal stats (median 
+   rank-correlation 0.98 between gated/ungated features — trees split on rank order, and 
+   gating mostly rescales) but **clearly helps the scale-sensitive Ridge** (val MAE 
+   84.2 → 63.7). The benefit is model-class dependent.
+4. **LightGBM >> Ridge everywhere** (best Ridge 34.8 vs best LGBM 21.8); the original 
+   absolute band-energy features were a set-identity leak — now fixed to relative energy.
+5. **Ceiling from two anomalous sets (5, 11):** LOSO pooled stays ~55 µm because those 
+   two setups break every model regardless of features or air-cut filtering.
+
 ---
 
 ## 6. Current Conclusions
@@ -410,13 +482,25 @@ sbatch run_vision_ablation.sh
 python gather_results.py --output-dir /scratch-shared/your_username/name_of_project_folder/runs/vision_ablation
 ```
  
-### Sensor fusion (already done):
+### Sensor fusion (done — now includes 3 air-cut experiments, array 0–12):
 ```bash
 cd /scratch-shared/your_username/name_of_project_folder/vision-sensor/
 mkdir -p /scratch-shared/your_username/name_of_project_folder/runs/sensor_ablation/logs
 sbatch run_sensor_ablation.sh
 # After jobs finish:
-python gather_results_sensor.py --output-dir /scratch-shared/your_username/name_of_project_folder/runs/sensor_ablation
+python gather_results.py --output-dir /scratch-shared/your_username/name_of_project_folder/runs/sensor_ablation
+# Air-cut comparison: compare intermediate_top25 vs intermediate_top25_gated, etc.
+```
+
+### Sensor-only deep dive (LightGBM + Ridge, air-cut filtering):
+```bash
+cd /scratch-shared/your_username/name_of_project_folder/sensor-only/
+pip install lightgbm   # enables the LightGBM method matrix
+python sensor_only_v2.py \
+    --data-dir   ../dataset/matwi \
+    --labels-csv ../dataset/matwi/labels.csv \
+    --output-dir ../runs/sensor_only_v2
+# Features are cached; reruns take seconds. Results in runs/sensor_only_v2/results.csv
 ```
  
 ### Check job status:

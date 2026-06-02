@@ -113,6 +113,7 @@ class ExperimentConfig:
     batch_size:         int   = 32
     sensor_encoder_dim: int   = 64
     dropout_backbone:   float = 0.3
+    gate_aircuts:       bool  = False   # remove tool-approach/retraction phases
 
 
 # ── Experiment grid ───────────────────────────────────────────────────────────
@@ -184,6 +185,35 @@ DEFAULT_EXPERIMENTS = [
         fusion_mode  = "late",
         feature_set  = "all40",
         use_sensors  = True,
+    ),
+
+    # ── Air-cut ablation ───────────────────────────────────────────────────
+    # Gated twins of the strongest fusion configs. Each is identical to its
+    # ungated counterpart above except gate_aircuts=True (sensor features are
+    # computed on the tool-engaged portion only, with length-invariant
+    # relative band energy). Compare *_gated vs the base name to isolate the
+    # air-cut effect. all40 is included because the relative-energy FFT fix
+    # matters most for the frequency features that gating most affects.
+    ExperimentConfig(
+        name         = "intermediate_top25_gated",
+        fusion_mode  = "intermediate",
+        feature_set  = "top25",
+        use_sensors  = True,
+        gate_aircuts = True,
+    ),
+    ExperimentConfig(
+        name         = "early_top25_gated",
+        fusion_mode  = "early",
+        feature_set  = "top25",
+        use_sensors  = True,
+        gate_aircuts = True,
+    ),
+    ExperimentConfig(
+        name         = "intermediate_all40_gated",
+        fusion_mode  = "intermediate",
+        feature_set  = "all40",
+        use_sensors  = True,
+        gate_aircuts = True,
     ),
 ]
 
@@ -263,6 +293,7 @@ def build_loaders(
         impute_zero_wear = False,
         image_size       = cfg.image_size,
         feature_set      = feature_set,
+        gate_aircuts     = cfg.gate_aircuts,
     )
 
     # Build training set and fit scaler
