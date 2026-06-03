@@ -1,0 +1,82 @@
+=== task 0 | use_taylor_slope=TRUE | epochs=34 seed=42 | node=gcn121.local.snellius.surf.nl ===
+  -> t3gated_taylor_ceil_l0.5_tslope_e34_s42
+[_load_module] train_vision_sensor_base <- /gpfs/scratch1/shared/hionescu/project_pinn/pinn/../vision-sensor/improve_attempt/train_vision_sensorV2.py
+[_load_module] taylor_physics_loss <- /gpfs/scratch1/shared/hionescu/project_pinn/pinn/taylor_physics_loss.py
+Device cuda | seed 42 | epochs 34 | out /gpfs/scratch1/shared/hionescu/project_pinn/pinn/runs/confirm/stage3_fusion
+
+================================================================================
+  STAGE 3 FUSION: t3gated_taylor_ceil_l0.5_tslope_e34_s42
+  base=t3_gated_top25_md30 (fusion=gated, features=top25, mdrop=0.3)
+  physics: lambda_max=0.5 warmup=2 apply_to=all one_sided=True taylor_slope=True
+================================================================================
+[MATWIMultimodalDataset] split=train | set_range=1-13 | norm=dataset | augment=False | n_samples=647 | wear_cap=450.0µm | feature_set=top25 (25 features) | scaler=None
+
+  Fitting sensor scaler on 647 training samples...
+[fit_sensor_scaler] Extracting features for 647 samples...
+  100/647
+  200/647
+  300/647
+  400/647
+  500/647
+  600/647
+[fit_sensor_scaler] Done. Feature stats after standardisation:
+  mean range : [-0.0000, 0.0000]  (should be ~0)
+  std  range : [1.0000, 1.0000]  (should be ~1)
+[MATWIMultimodalDataset] split=val | set_range=1-13 | norm=dataset | augment=False | n_samples=300 | wear_cap=450.0µm | feature_set=top25 (25 features) | scaler=fitted
+[MATWIMultimodalDataset] split=test | set_range=1-13 | norm=dataset | augment=False | n_samples=247 | wear_cap=450.0µm | feature_set=top25 (25 features) | scaler=fitted
+  Loaders: train: 647  |  val: 300  |  test: 247
+[SensorScaler] Saved to /gpfs/scratch1/shared/hionescu/project_pinn/pinn/runs/confirm/stage3_fusion/t3gated_taylor_ceil_l0.5_tslope_e34_s42/sensor_scaler.pkl
+[MATWIMultimodalModel] fusion=gated | n_sensor_feat=25 | modality_dropout_p=0.3 | pretrained=True
+  Total params    : 20,186,002
+  Trainable params: 20,186,002
+  PhysicsLoss: [CK45(n=0.25,C=448.1387), RVS 304(n=-0.129526,C=72.297)] lambda_max=0.5 warmup=2 window=(0.15,0.85) apply_to=all one_sided=True taylor_slope=True
+  [01/34] data=0.07904 phys=0.003080 gate=0.452 train_mae=118.8µm | val overall=106.15µm  flank=123.85  adh=67.77  f+a=83.88  (n=300) (87.6s)
+    ✓ new best val_mae=106.15µm
+  [02/34] data=0.01214 phys=0.000562 gate=0.494 train_mae=70.9µm | val overall=77.26µm  flank=97.86  adh=92.01  f+a=47.94  (n=300) (45.4s)
+    ✓ new best val_mae=77.26µm
+  [03/34] data=0.00518 phys=0.000335 gate=0.439 train_mae=52.0µm | val overall=45.99µm  flank=50.58  adh=47.95  f+a=39.55  (n=300) (46.1s)
+    ✓ new best val_mae=45.99µm
+  [04/34] data=0.00330 phys=0.000231 gate=0.420 train_mae=42.1µm | val overall=40.81µm  flank=43.06  adh=39.47  f+a=37.77  (n=300) (51.0s)
+    ✓ new best val_mae=40.81µm
+  [05/34] data=0.00238 phys=0.000184 gate=0.415 train_mae=36.5µm | val overall=41.82µm  flank=37.86  adh=20.24  f+a=48.53  (n=300) (47.4s)
+  [06/34] data=0.00206 phys=0.000265 gate=0.413 train_mae=33.3µm | val overall=38.18µm  flank=35.60  adh=17.74  f+a=42.91  (n=300) (46.0s)
+    ✓ new best val_mae=38.18µm
+  [07/34] data=0.00144 phys=0.000099 gate=0.409 train_mae=29.8µm | val overall=37.55µm  flank=35.69  adh=23.43  f+a=40.93  (n=300) (46.8s)
+    ✓ new best val_mae=37.55µm
+  [08/34] data=0.00141 phys=0.000090 gate=0.414 train_mae=28.3µm | val overall=39.14µm  flank=40.80  adh=41.36  f+a=36.72  (n=300) (47.8s)
+  [09/34] data=0.00103 phys=0.000146 gate=0.411 train_mae=24.7µm | val overall=38.03µm  flank=36.49  adh=34.14  f+a=40.39  (n=300) (50.6s)
+  [10/34] data=0.00099 phys=0.000100 gate=0.420 train_mae=23.6µm | val overall=41.57µm  flank=43.08  adh=46.34  f+a=39.22  (n=300) (46.5s)
+  [11/34] data=0.00115 phys=0.000133 gate=0.418 train_mae=25.8µm | val overall=38.35µm  flank=37.27  adh=24.88  f+a=40.62  (n=300) (46.8s)
+  [12/34] data=0.00099 phys=0.000122 gate=0.415 train_mae=22.8µm | val overall=40.62µm  flank=37.94  adh=16.00  f+a=45.74  (n=300) (50.8s)
+  [13/34] data=0.00100 phys=0.000167 gate=0.417 train_mae=24.5µm | val overall=42.09µm  flank=45.13  adh=52.99  f+a=37.27  (n=300) (51.7s)
+  [14/34] data=0.00090 phys=0.000134 gate=0.416 train_mae=22.4µm | val overall=38.03µm  flank=37.15  adh=34.44  f+a=39.45  (n=300) (47.3s)
+  [15/34] data=0.00079 phys=0.000098 gate=0.418 train_mae=21.2µm | val overall=37.45µm  flank=34.70  adh=18.79  f+a=42.32  (n=300) (51.5s)
+    ✓ new best val_mae=37.45µm
+  [16/34] data=0.00078 phys=0.000114 gate=0.412 train_mae=21.5µm | val overall=37.44µm  flank=38.37  adh=36.15  f+a=36.23  (n=300) (47.2s)
+    ✓ new best val_mae=37.44µm
+  [17/34] data=0.00071 phys=0.000117 gate=0.416 train_mae=20.1µm | val overall=35.46µm  flank=33.07  adh=24.42  f+a=39.39  (n=300) (49.7s)
+    ✓ new best val_mae=35.46µm
+  [18/34] data=0.00072 phys=0.000131 gate=0.415 train_mae=20.3µm | val overall=36.57µm  flank=33.79  adh=18.22  f+a=41.46  (n=300) (46.6s)
+  [19/34] data=0.00066 phys=0.000084 gate=0.416 train_mae=18.4µm | val overall=36.20µm  flank=33.93  adh=25.98  f+a=39.92  (n=300) (46.8s)
+  [20/34] data=0.00048 phys=0.000119 gate=0.415 train_mae=16.6µm | val overall=36.81µm  flank=32.98  adh=24.69  f+a=42.81  (n=300) (50.9s)
+  [21/34] data=0.00056 phys=0.000068 gate=0.412 train_mae=17.8µm | val overall=37.25µm  flank=35.15  adh=32.70  f+a=40.40  (n=300) (51.6s)
+  [22/34] data=0.00056 phys=0.000124 gate=0.416 train_mae=18.0µm | val overall=35.37µm  flank=33.94  adh=29.18  f+a=37.68  (n=300) (46.6s)
+    ✓ new best val_mae=35.37µm
+  [23/34] data=0.00042 phys=0.000116 gate=0.420 train_mae=15.1µm | val overall=36.79µm  flank=34.49  adh=31.89  f+a=40.26  (n=300) (50.4s)
+  [24/34] data=0.00047 phys=0.000077 gate=0.417 train_mae=16.0µm | val overall=35.81µm  flank=32.16  adh=29.13  f+a=41.24  (n=300) (49.7s)
+  [25/34] data=0.00040 phys=0.000076 gate=0.415 train_mae=15.0µm | val overall=36.43µm  flank=33.72  adh=16.13  f+a=41.33  (n=300) (51.2s)
+  [26/34] data=0.00035 phys=0.000083 gate=0.417 train_mae=13.6µm | val overall=34.34µm  flank=32.83  adh=29.08  f+a=36.72  (n=300) (46.6s)
+    ✓ new best val_mae=34.34µm
+  [27/34] data=0.00032 phys=0.000098 gate=0.416 train_mae=13.5µm | val overall=35.70µm  flank=33.52  adh=25.92  f+a=39.28  (n=300) (52.8s)
+  [28/34] data=0.00034 phys=0.000090 gate=0.416 train_mae=13.1µm | val overall=35.12µm  flank=33.52  adh=23.11  f+a=38.01  (n=300) (52.9s)
+  [29/34] data=0.00033 phys=0.000102 gate=0.414 train_mae=13.3µm | val overall=37.57µm  flank=34.29  adh=13.79  f+a=43.47  (n=300) (53.0s)
+  [30/34] data=0.00039 phys=0.000095 gate=0.418 train_mae=14.6µm | val overall=35.30µm  flank=32.29  adh=17.22  f+a=40.50  (n=300) (52.7s)
+  [31/34] data=0.00046 phys=0.000110 gate=0.407 train_mae=15.2µm | val overall=36.86µm  flank=33.79  adh=25.41  f+a=41.74  (n=300) (54.8s)
+  [32/34] data=0.00040 phys=0.000123 gate=0.416 train_mae=15.0µm | val overall=37.14µm  flank=32.68  adh=13.13  f+a=44.68  (n=300) (51.9s)
+  [33/34] data=0.00035 phys=0.000074 gate=0.411 train_mae=13.2µm | val overall=35.19µm  flank=33.41  adh=23.28  f+a=38.33  (n=300) (53.9s)
+  [34/34] data=0.00037 phys=0.000102 gate=0.410 train_mae=13.4µm | val overall=36.58µm  flank=32.65  adh=21.41  f+a=42.87  (n=300) (52.7s)
+
+  --- Final results: t3gated_taylor_ceil_l0.5_tslope_e34_s42 (best epoch 26) ---
+  [val    ] overall=34.34µm  flank=32.83  adh=29.08  f+a=36.72  (n=300)
+  [test   ] overall=22.76µm  flank=17.76  adh=41.49  f+a=37.72  (n=247)
+done: t3gated_taylor_ceil_l0.5_tslope_e34_s42

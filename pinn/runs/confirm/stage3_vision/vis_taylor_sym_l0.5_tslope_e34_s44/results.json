@@ -1,0 +1,52 @@
+{
+  "experiment": "vis_taylor_sym_l0.5_tslope_e34_s44",
+  "config": {
+    "name": "vis_taylor_sym_l0.5_tslope_e34_s44",
+    "backbone": "efficientnetv2_s",
+    "set_range": "1-13",
+    "image_size": [
+      384,
+      384
+    ],
+    "epochs": 34,
+    "lr": 0.0003,
+    "normalisation": "dataset",
+    "weight_decay": 0.0001,
+    "batch_size": 32,
+    "use_scheduler": true,
+    "data_loss": "mse"
+  },
+  "physics": {
+    "lambda_max": 0.5,
+    "warmup": 2,
+    "apply_to": "all",
+    "one_sided": false,
+    "use_taylor_slope": true
+  },
+  "best_epoch": 13,
+  "best_val_mae_um": 63.90757369995117,
+  "splits": {
+    "val": {
+      "mae_overall_um": 63.90757369995117,
+      "n_total": 301,
+      "mae_flank_wear_um": 71.27384185791016,
+      "n_flank_wear": 170,
+      "mae_adhesion_um": 76.3861312866211,
+      "n_adhesion": 8,
+      "mae_flank_wear+adhesion_um": 52.914939880371094,
+      "n_flank_wear+adhesion": 123,
+      "loss": 0.06390757893407067
+    },
+    "test": {
+      "mae_overall_um": 44.94504928588867,
+      "n_total": 254,
+      "mae_flank_wear_um": 49.73847198486328,
+      "n_flank_wear": 193,
+      "mae_adhesion_um": 55.58750534057617,
+      "n_adhesion": 15,
+      "mae_flank_wear+adhesion_um": 21.36315155029297,
+      "n_flank_wear+adhesion": 46,
+      "loss": 0.044945048050969605
+    }
+  }
+}

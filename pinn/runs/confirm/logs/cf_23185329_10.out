@@ -1,0 +1,72 @@
+=== task 10 | family=vision role=sym lambda=0.5 epochs=34 seed=43 warmup=2 | node=gcn147.local.snellius.surf.nl ===
+  -> vis_taylor_sym_l0.5_e34_s43
+Device cuda | seed 43 | out /gpfs/scratch1/shared/hionescu/project_pinn/pinn/runs/confirm/stage3_vision
+
+================================================================================
+  STAGE 3: vis_taylor_sym_l0.5_e34_s43  (backbone=efficientnetv2_s, data_loss=mse)
+  physics: lambda_max=0.5 warmup=2 apply_to=all one_sided=False taylor_slope=False
+================================================================================
+[MATWIVisionDataset] split=train | set_range=1-13 | norm=dataset | augment=False | n_samples=664 | wear_cap=450.0µm | impute_zero=False
+[MATWIVisionDataset] split=val | set_range=1-13 | norm=dataset | augment=False | n_samples=301 | wear_cap=450.0µm | impute_zero=False
+[MATWIVisionDataset] split=test | set_range=1-13 | norm=dataset | augment=False | n_samples=254 | wear_cap=450.0µm | impute_zero=False
+[MATWIVisionDataset] split=unseen | set_range=1-13 | norm=dataset | augment=False | n_samples=0 | wear_cap=450.0µm | impute_zero=False
+  [warn] split='unseen' empty, skipping.
+  Loaders: train: 664  |  val: 301  |  test: 254
+[MATWIVisionModel] backbone=efficientnetv2_s | head=simple | feat_dim=1280 | pretrained=True
+  Total params    : 20,178,769
+  Trainable params: 20,178,769
+  PhysicsLoss: [CK45(n=0.25,C=448.1387), RVS 304(n=-0.129526,C=72.297)] lambda_max=0.5 warmup=2 window=(0.15,0.85) apply_to=all one_sided=False taylor_slope=False
+  [01/34] data=0.17011 phys=0.039591 train_mae=118.1µm | val overall=169.62µm  flank=195.23  adh=61.08  f+a=141.28  (n=301) (65.1s)
+    ✓ new best val_mae=169.62µm
+  [02/34] data=0.08009 phys=0.037276 train_mae=139.8µm | val overall=119.79µm  flank=132.43  adh=107.10  f+a=103.15  (n=301) (33.6s)
+    ✓ new best val_mae=119.79µm
+  [03/34] data=0.07313 phys=0.034196 train_mae=126.3µm | val overall=90.03µm  flank=88.52  adh=67.25  f+a=93.60  (n=301) (34.0s)
+    ✓ new best val_mae=90.03µm
+  [04/34] data=0.02818 phys=0.012385 train_mae=98.1µm | val overall=88.11µm  flank=91.44  adh=48.73  f+a=86.07  (n=301) (37.3s)
+    ✓ new best val_mae=88.11µm
+  [05/34] data=0.00793 phys=0.002988 train_mae=61.7µm | val overall=48.29µm  flank=44.70  adh=27.40  f+a=54.61  (n=301) (35.8s)
+    ✓ new best val_mae=48.29µm
+  [06/34] data=0.00379 phys=0.001762 train_mae=43.7µm | val overall=45.20µm  flank=39.26  adh=18.85  f+a=55.14  (n=301) (34.5s)
+    ✓ new best val_mae=45.20µm
+  [07/34] data=0.00308 phys=0.001524 train_mae=40.4µm | val overall=50.52µm  flank=44.71  adh=24.67  f+a=60.25  (n=301) (35.3s)
+  [08/34] data=0.00257 phys=0.001230 train_mae=37.3µm | val overall=44.43µm  flank=38.28  adh=16.53  f+a=54.75  (n=301) (34.3s)
+    ✓ new best val_mae=44.43µm
+  [09/34] data=0.00223 phys=0.001228 train_mae=34.6µm | val overall=45.19µm  flank=35.88  adh=13.83  f+a=60.10  (n=301) (34.4s)
+  [10/34] data=0.00197 phys=0.000939 train_mae=33.2µm | val overall=44.68µm  flank=40.18  adh=13.59  f+a=52.93  (n=301) (35.7s)
+  [11/34] data=0.00152 phys=0.000722 train_mae=29.5µm | val overall=45.99µm  flank=42.94  adh=13.93  f+a=52.28  (n=301) (34.0s)
+  [12/34] data=0.00155 phys=0.000729 train_mae=28.3µm | val overall=43.55µm  flank=36.87  adh=15.91  f+a=54.57  (n=301) (38.3s)
+    ✓ new best val_mae=43.55µm
+  [13/34] data=0.00132 phys=0.000773 train_mae=26.2µm | val overall=47.40µm  flank=38.77  adh=32.49  f+a=60.31  (n=301) (34.7s)
+  [14/34] data=0.00149 phys=0.000868 train_mae=28.0µm | val overall=41.92µm  flank=33.95  adh=19.20  f+a=54.40  (n=301) (35.6s)
+    ✓ new best val_mae=41.92µm
+  [15/34] data=0.00100 phys=0.000453 train_mae=23.3µm | val overall=41.55µm  flank=33.45  adh=21.60  f+a=54.05  (n=301) (33.8s)
+    ✓ new best val_mae=41.55µm
+  [16/34] data=0.00102 phys=0.000599 train_mae=23.8µm | val overall=40.97µm  flank=34.13  adh=15.87  f+a=52.06  (n=301) (36.5s)
+    ✓ new best val_mae=40.97µm
+  [17/34] data=0.00085 phys=0.000364 train_mae=21.3µm | val overall=40.78µm  flank=34.08  adh=19.00  f+a=51.45  (n=301) (36.0s)
+    ✓ new best val_mae=40.78µm
+  [18/34] data=0.00073 phys=0.000489 train_mae=19.5µm | val overall=42.32µm  flank=35.84  adh=9.68  f+a=53.39  (n=301) (37.1s)
+  [19/34] data=0.00085 phys=0.000386 train_mae=21.3µm | val overall=40.71µm  flank=34.21  adh=13.10  f+a=51.49  (n=301) (35.2s)
+    ✓ new best val_mae=40.71µm
+  [20/34] data=0.00064 phys=0.000373 train_mae=18.1µm | val overall=39.79µm  flank=33.72  adh=15.09  f+a=49.79  (n=301) (34.3s)
+    ✓ new best val_mae=39.79µm
+  [21/34] data=0.00060 phys=0.000329 train_mae=18.0µm | val overall=41.11µm  flank=35.43  adh=12.11  f+a=50.84  (n=301) (36.8s)
+  [22/34] data=0.00062 phys=0.000329 train_mae=17.4µm | val overall=40.08µm  flank=32.81  adh=18.66  f+a=51.51  (n=301) (40.9s)
+  [23/34] data=0.00052 phys=0.000297 train_mae=16.8µm | val overall=41.19µm  flank=34.05  adh=11.17  f+a=53.01  (n=301) (38.8s)
+  [24/34] data=0.00050 phys=0.000306 train_mae=15.8µm | val overall=39.84µm  flank=32.76  adh=16.75  f+a=51.12  (n=301) (34.2s)
+  [25/34] data=0.00048 phys=0.000386 train_mae=16.0µm | val overall=39.66µm  flank=32.80  adh=15.31  f+a=50.73  (n=301) (35.7s)
+    ✓ new best val_mae=39.66µm
+  [26/34] data=0.00042 phys=0.000292 train_mae=14.8µm | val overall=40.85µm  flank=33.54  adh=21.80  f+a=52.19  (n=301) (35.1s)
+  [27/34] data=0.00048 phys=0.000255 train_mae=15.6µm | val overall=40.22µm  flank=33.04  adh=17.87  f+a=51.59  (n=301) (41.0s)
+  [28/34] data=0.00045 phys=0.000292 train_mae=14.9µm | val overall=39.75µm  flank=32.91  adh=16.46  f+a=50.71  (n=301) (38.3s)
+  [29/34] data=0.00044 phys=0.000323 train_mae=15.3µm | val overall=39.71µm  flank=32.72  adh=17.35  f+a=50.82  (n=301) (43.8s)
+  [30/34] data=0.00043 phys=0.000299 train_mae=14.7µm | val overall=39.69µm  flank=32.70  adh=17.53  f+a=50.79  (n=301) (40.9s)
+  [31/34] data=0.00039 phys=0.000277 train_mae=14.4µm | val overall=39.81µm  flank=32.89  adh=18.30  f+a=50.78  (n=301) (44.3s)
+  [32/34] data=0.00043 phys=0.000270 train_mae=14.4µm | val overall=39.68µm  flank=32.86  adh=15.73  f+a=50.65  (n=301) (41.7s)
+  [33/34] data=0.00043 phys=0.000273 train_mae=14.2µm | val overall=39.69µm  flank=32.84  adh=15.55  f+a=50.73  (n=301) (52.3s)
+  [34/34] data=0.00045 phys=0.000299 train_mae=14.5µm | val overall=39.77µm  flank=32.82  adh=15.10  f+a=50.98  (n=301) (43.2s)
+
+  --- Final results: vis_taylor_sym_l0.5_e34_s43 (best epoch 25) ---
+  [val    ] overall=39.66µm  flank=32.80  adh=15.31  f+a=50.73  (n=301)
+  [test   ] overall=20.06µm  flank=18.01  adh=34.04  f+a=24.10  (n=254)
+done: vis_taylor_sym_l0.5_e34_s43

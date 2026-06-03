@@ -1,0 +1,83 @@
+════════════════════════════════════════════════════════════════
+  Job ID      : 23143696
+  Array index : 1
+  Experiment  : t3_intermediate_top25_md30
+  Node        : gcn142.local.snellius.surf.nl
+  GPU         : NVIDIA H100
+  Started     : Wed May 27 14:52:53 CEST 2026
+════════════════════════════════════════════════════════════════
+Device       : cuda
+Experiments  : ['t3_intermediate_top25_md30']
+Output dir   : /gpfs/scratch1/shared/hionescu/project_pinn/vision-sensor/improve_attempt
+
+================================================================================
+  EXPERIMENT: t3_intermediate_top25_md30
+  fusion=intermediate  features=top25  sensors=True  loss=MSE  lr=0.0003
+================================================================================
+[MATWIMultimodalDataset] split=train | set_range=1-13 | norm=dataset | augment=False | n_samples=647 | wear_cap=450.0µm | feature_set=top25 (25 features) | scaler=None
+
+  Fitting sensor scaler on 647 training samples...
+[fit_sensor_scaler] Extracting features for 647 samples...
+  100/647
+  200/647
+  300/647
+  400/647
+  500/647
+  600/647
+[fit_sensor_scaler] Done. Feature stats after standardisation:
+  mean range : [-0.0000, 0.0000]  (should be ~0)
+  std  range : [1.0000, 1.0000]  (should be ~1)
+[MATWIMultimodalDataset] split=val | set_range=1-13 | norm=dataset | augment=False | n_samples=300 | wear_cap=450.0µm | feature_set=top25 (25 features) | scaler=fitted
+[MATWIMultimodalDataset] split=test | set_range=1-13 | norm=dataset | augment=False | n_samples=247 | wear_cap=450.0µm | feature_set=top25 (25 features) | scaler=fitted
+  Loaders: train: 647  |  val: 300  |  test: 247
+[SensorScaler] Saved to /gpfs/scratch1/shared/hionescu/project_pinn/vision-sensor/improve_attempt/t3_intermediate_top25_md30/sensor_scaler.pkl
+[MATWIMultimodalModel] fusion=intermediate | n_sensor_feat=25 | modality_dropout_p=0.3 | pretrained=True
+  Total params    : 20,184,657
+  Trainable params: 20,184,657
+  Optimiser: AdamW (lr=0.0003, wd=0.0001)
+  Scheduler: None (fixed LR=0.0003)
+  Loss: MSE → MSELoss()
+  [01/17]  train loss=0.07533 mae=133.2µm  |  val overall=84.13µm  flank=88.62  adh=43.00  f+a=80.26  (n=300)  lr=3.00e-04  (83.0s)
+    ✓ new best val_mae=84.13µm
+  [02/17]  train loss=0.00955 mae=63.4µm  |  val overall=64.62µm  flank=53.70  adh=25.52  f+a=81.94  (n=300)  lr=3.00e-04  (50.0s)
+    ✓ new best val_mae=64.62µm
+  [03/17]  train loss=0.00401 mae=44.0µm  |  val overall=43.62µm  flank=40.45  adh=28.89  f+a=48.84  (n=300)  lr=3.00e-04  (54.7s)
+    ✓ new best val_mae=43.62µm
+  [04/17]  train loss=0.00269 mae=38.1µm  |  val overall=55.77µm  flank=52.95  adh=18.42  f+a=61.80  (n=300)  lr=3.00e-04  (50.3s)
+  [05/17]  train loss=0.00202 mae=33.7µm  |  val overall=44.02µm  flank=41.64  adh=19.48  f+a=48.71  (n=300)  lr=3.00e-04  (46.7s)
+  [06/17]  train loss=0.00165 mae=30.8µm  |  val overall=47.41µm  flank=40.18  adh=20.79  f+a=58.91  (n=300)  lr=3.00e-04  (51.4s)
+  [07/17]  train loss=0.00133 mae=26.7µm  |  val overall=43.38µm  flank=39.88  adh=18.64  f+a=49.63  (n=300)  lr=3.00e-04  (52.1s)
+    ✓ new best val_mae=43.38µm
+  [08/17]  train loss=0.00129 mae=26.7µm  |  val overall=42.60µm  flank=38.93  adh=36.08  f+a=48.04  (n=300)  lr=3.00e-04  (50.1s)
+    ✓ new best val_mae=42.60µm
+  [09/17]  train loss=0.00113 mae=25.2µm  |  val overall=42.92µm  flank=40.72  adh=23.86  f+a=47.05  (n=300)  lr=3.00e-04  (45.0s)
+  [10/17]  train loss=0.00105 mae=24.5µm  |  val overall=41.04µm  flank=37.44  adh=36.87  f+a=46.24  (n=300)  lr=3.00e-04  (45.5s)
+    ✓ new best val_mae=41.04µm
+  [11/17]  train loss=0.00079 mae=20.7µm  |  val overall=43.87µm  flank=36.75  adh=21.07  f+a=55.02  (n=300)  lr=3.00e-04  (51.0s)
+  [12/17]  train loss=0.00083 mae=21.3µm  |  val overall=50.73µm  flank=45.86  adh=9.40  f+a=59.82  (n=300)  lr=3.00e-04  (53.7s)
+  [13/17]  train loss=0.00059 mae=18.2µm  |  val overall=43.93µm  flank=37.99  adh=25.14  f+a=53.21  (n=300)  lr=3.00e-04  (52.8s)
+  [14/17]  train loss=0.00059 mae=17.3µm  |  val overall=43.59µm  flank=40.30  adh=17.21  f+a=49.64  (n=300)  lr=3.00e-04  (52.6s)
+  [15/17]  train loss=0.00059 mae=16.2µm  |  val overall=41.28µm  flank=36.72  adh=30.93  f+a=48.17  (n=300)  lr=3.00e-04  (52.4s)
+  [16/17]  train loss=0.00057 mae=17.6µm  |  val overall=41.27µm  flank=36.79  adh=22.90  f+a=48.49  (n=300)  lr=3.00e-04  (52.9s)
+  [17/17]  train loss=0.00040 mae=15.2µm  |  val overall=39.01µm  flank=35.71  adh=26.93  f+a=44.25  (n=300)  lr=3.00e-04  (53.0s)
+    ✓ new best val_mae=39.01µm
+
+  Restored best model (epoch 17, val=39.01µm)
+
+  --- Final results: t3_intermediate_top25_md30 ---
+  [val    ] overall=39.01µm  flank=35.71  adh=26.93  f+a=44.25  (n=300)
+  [test   ] overall=27.52µm  flank=21.38  adh=44.59  f+a=47.94  (n=247)
+
+====================================================================================================
+  SENSOR FUSION ABLATION — TEST SET RESULTS (sorted by overall MAE)
+====================================================================================================
+                 experiment  fusion_mode feature_set  mae_overall_um  mae_flank_wear_um  mae_adhesion_um  mae_flank_wear+adhesion_um best_epoch
+vision_only_664 (reference)         none        none       19.000000          16.600000        37.200000                   23.200000         14
+vision_only_647 (reference)         none        none       22.400000          20.300000        35.100000                   27.100000         15
+ t3_intermediate_top25_md30 intermediate       top25       27.524635          21.384321        44.589138                   47.943092         17
+             paper_baseline         none        none       30.000000          14.000000        39.000000                   91.000000          —
+
+  Full results (all splits) → /gpfs/scratch1/shared/hionescu/project_pinn/vision-sensor/improve_attempt/comparison_summary.csv
+
+  Finished : Wed May 27 15:10:50 CEST 2026
+════════════════════════════════════════════════════════════════

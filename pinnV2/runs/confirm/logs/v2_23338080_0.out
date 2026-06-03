@@ -1,0 +1,51 @@
+=== 0 | vision_only_ctrl_e17_s42 ===
+Device cuda | seed 42 | out /gpfs/scratch1/shared/hionescu/project_pinn/pinnV2/runs/confirm/stage3_vision
+
+================================================================================
+  STAGE 3: vision_only_ctrl_e17_s42  (backbone=efficientnetv2_s, data_loss=mse)
+  physics: lambda_max=0.0 warmup=4 apply_to=all one_sided=False taylor_slope=False
+================================================================================
+[MATWIVisionDataset] split=train | set_range=1-13 | norm=dataset | augment=False | n_samples=664 | wear_cap=450.0µm | impute_zero=False
+[MATWIVisionDataset] split=val | set_range=1-13 | norm=dataset | augment=False | n_samples=301 | wear_cap=450.0µm | impute_zero=False
+[MATWIVisionDataset] split=test | set_range=1-13 | norm=dataset | augment=False | n_samples=254 | wear_cap=450.0µm | impute_zero=False
+[MATWIVisionDataset] split=unseen | set_range=1-13 | norm=dataset | augment=False | n_samples=0 | wear_cap=450.0µm | impute_zero=False
+  [warn] split='unseen' empty, skipping.
+  Loaders: train: 664  |  val: 301  |  test: 254
+[MATWIVisionModel] backbone=efficientnetv2_s | head=simple | feat_dim=1280 | pretrained=True
+  Total params    : 20,178,769
+  Trainable params: 20,178,769
+  PhysicsLoss: [CK45(n=0.25,C=765.8101), RVS 304(n=0.2,C=328.1426)] lambda_max=0.0 warmup=4 window=(0.15,0.85) apply_to=all one_sided=False taylor_slope=False
+  [01/17] data=0.27869 phys=0.000000 train_mae=109.6µm | val overall=240.66µm  flank=254.28  adh=336.16  f+a=215.63  (n=301) (72.6s)
+    ✓ new best val_mae=240.66µm
+  [02/17] data=0.09649 phys=0.000000 train_mae=158.7µm | val overall=115.51µm  flank=106.67  adh=78.64  f+a=130.14  (n=301) (41.4s)
+    ✓ new best val_mae=115.51µm
+  [03/17] data=0.03416 phys=0.000000 train_mae=92.2µm | val overall=86.36µm  flank=103.57  adh=99.35  f+a=61.73  (n=301) (41.4s)
+    ✓ new best val_mae=86.36µm
+  [04/17] data=0.00507 phys=0.000000 train_mae=50.7µm | val overall=59.47µm  flank=53.04  adh=31.34  f+a=70.19  (n=301) (40.7s)
+    ✓ new best val_mae=59.47µm
+  [05/17] data=0.00306 phys=0.000000 train_mae=41.5µm | val overall=55.27µm  flank=44.48  adh=18.41  f+a=72.59  (n=301) (35.1s)
+    ✓ new best val_mae=55.27µm
+  [06/17] data=0.00311 phys=0.000000 train_mae=39.9µm | val overall=66.73µm  flank=72.20  adh=60.56  f+a=59.57  (n=301) (37.1s)
+  [07/17] data=0.00226 phys=0.000000 train_mae=34.8µm | val overall=53.11µm  flank=51.56  adh=40.71  f+a=56.06  (n=301) (39.0s)
+    ✓ new best val_mae=53.11µm
+  [08/17] data=0.00228 phys=0.000000 train_mae=35.8µm | val overall=52.03µm  flank=50.03  adh=35.78  f+a=55.86  (n=301) (37.2s)
+    ✓ new best val_mae=52.03µm
+  [09/17] data=0.00153 phys=0.000000 train_mae=29.4µm | val overall=48.97µm  flank=39.49  adh=17.81  f+a=64.10  (n=301) (34.3s)
+    ✓ new best val_mae=48.97µm
+  [10/17] data=0.00145 phys=0.000000 train_mae=28.4µm | val overall=52.80µm  flank=42.11  adh=18.85  f+a=69.79  (n=301) (35.0s)
+  [11/17] data=0.00114 phys=0.000000 train_mae=25.9µm | val overall=48.76µm  flank=39.37  adh=15.84  f+a=63.86  (n=301) (36.2s)
+    ✓ new best val_mae=48.76µm
+  [12/17] data=0.00099 phys=0.000000 train_mae=24.0µm | val overall=48.35µm  flank=37.62  adh=12.44  f+a=65.52  (n=301) (34.7s)
+    ✓ new best val_mae=48.35µm
+  [13/17] data=0.00095 phys=0.000000 train_mae=23.6µm | val overall=46.40µm  flank=37.04  adh=13.74  f+a=61.46  (n=301) (33.4s)
+    ✓ new best val_mae=46.40µm
+  [14/17] data=0.00079 phys=0.000000 train_mae=21.4µm | val overall=46.21µm  flank=39.06  adh=20.66  f+a=57.76  (n=301) (34.1s)
+    ✓ new best val_mae=46.21µm
+  [15/17] data=0.00073 phys=0.000000 train_mae=21.2µm | val overall=46.73µm  flank=39.81  adh=21.20  f+a=57.97  (n=301) (33.3s)
+  [16/17] data=0.00077 phys=0.000000 train_mae=21.5µm | val overall=46.98µm  flank=39.11  adh=19.27  f+a=59.66  (n=301) (36.5s)
+  [17/17] data=0.00068 phys=0.000000 train_mae=20.2µm | val overall=46.86µm  flank=40.48  adh=22.28  f+a=57.28  (n=301) (38.6s)
+
+  --- Final results: vision_only_ctrl_e17_s42 (best epoch 14) ---
+  [val    ] overall=46.21µm  flank=39.06  adh=20.66  f+a=57.76  (n=301)
+  [test   ] overall=24.73µm  flank=19.49  adh=36.31  f+a=42.92  (n=254)
+done: vision_only_ctrl_e17_s42
