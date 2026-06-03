@@ -143,12 +143,16 @@ class MATWIMultimodalModel(nn.Module):
         n_sensor_features:  int   = 40,
         sensor_encoder_dim: int   = 64,
         dropout_backbone:   float = 0.3,
+        enable_sensor_aux_head: bool = False,
+        enable_vision_aux_head: bool = False,
         pretrained:         bool  = True,
     ):
         super().__init__()
 
         self.fusion_mode = fusion_mode
         self.use_sensors = use_sensors
+        self.enable_sensor_aux_head = enable_sensor_aux_head
+        self.enable_vision_aux_head = enable_vision_aux_head
 
         # ── Backbone ──────────────────────────────────────────────────────────
         self.backbone = timm.create_model(
@@ -198,6 +202,16 @@ class MATWIMultimodalModel(nn.Module):
             # Vision-only: single linear head on backbone output
             self.head = nn.Linear(BACKBONE_FEATDIM, 1)
 
+        # ── Optional auxiliary heads (Option 1: optimisation-side fix) ──────
+        # Vision aux can be used in all modes because image_embed is always available.
+        self.vision_aux_head = (
+            nn.Linear(BACKBONE_FEATDIM, 1) if self.enable_vision_aux_head else None
+        )
+        # Sensor aux requires sensor embedding, which exists in intermediate/late.
+        self.sensor_aux_head = None
+        if self.enable_sensor_aux_head and self.use_sensors and self.fusion_mode in {"intermediate", "late"}:
+            self.sensor_aux_head = nn.Linear(sensor_encoder_dim, 1)
+
         # ── Summary ───────────────────────────────────────────────────────────
         total_params     = sum(p.numel() for p in self.parameters())
         trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
@@ -223,7 +237,8 @@ class MATWIMultimodalModel(nn.Module):
 
         Returns
         -------
-        dict with keys: wear, image_embed, sensor_embed, pred_image, pred_sensor
+        dict with keys: wear, image_embed, sensor_embed, pred_image, pred_sensor,
+        pred_sensor_aux, pred_vision_aux
         """
         # ── Image branch ─────────────────────────────────────────────────────
         image_embed = self.backbone(images)   # (B, 1280)
@@ -233,6 +248,8 @@ class MATWIMultimodalModel(nn.Module):
             "sensor_embed": None,
             "pred_image":   None,
             "pred_sensor":  None,
+            "pred_sensor_aux": None,
+            "pred_vision_aux": None,
         }
 
         # ── Fusion ───────────────────────────────────────────────────────────
@@ -260,6 +277,12 @@ class MATWIMultimodalModel(nn.Module):
             out["sensor_embed"] = sensor_embed
             out["pred_image"]   = pred_image
             out["pred_sensor"]  = pred_sensor
+
+        if self.vision_aux_head is not None:
+            out["pred_vision_aux"] = self.vision_aux_head(image_embed)
+
+        if self.sensor_aux_head is not None and out["sensor_embed"] is not None:
+            out["pred_sensor_aux"] = self.sensor_aux_head(out["sensor_embed"])
 
         out["wear"] = wear
         return out

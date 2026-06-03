@@ -320,11 +320,20 @@ def train_one_epoch(
     criterion:  nn.Module,
     device:     torch.device,
     use_sensors: bool,
+    alpha_sensor_aux: float,
+    beta_vision_aux: float,
     log_every:  int = 0,
 ) -> dict[str, float]:
     model.train()
     total_loss = 0.0
+    total_fused_loss = 0.0
+    total_sensor_aux_loss = 0.0
+    total_vision_aux_loss = 0.0
     total_mae  = 0.0
+    total_sensor_aux_mae = 0.0
+    total_vision_aux_mae = 0.0
+    n_sensor_aux = 0
+    n_vision_aux = 0
     n = 0
 
     for step, batch in enumerate(loader, 1):
@@ -337,8 +346,34 @@ def train_one_epoch(
             sensor_features = batch["sensor_features"].to(device, non_blocking=True)
 
         optimizer.zero_grad(set_to_none=True)
-        out  = model(images, sensor_features)
-        loss = criterion(out["wear"], target)
+        out = model(images, sensor_features)
+
+        fused_loss = criterion(out["wear"], target)
+        loss = fused_loss
+
+        sensor_aux_loss_val = 0.0
+        vision_aux_loss_val = 0.0
+
+        if alpha_sensor_aux > 0.0 and out.get("pred_sensor_aux") is not None:
+            sensor_aux_loss = criterion(out["pred_sensor_aux"], target)
+            loss = loss + alpha_sensor_aux * sensor_aux_loss
+            sensor_aux_loss_val = sensor_aux_loss.item()
+
+            sensor_aux_pred_um = predictions_to_um(out["pred_sensor_aux"].detach())
+            batch_sensor_aux_mae = torch.abs(sensor_aux_pred_um - target_um).mean().item()
+            total_sensor_aux_mae += batch_sensor_aux_mae * images.size(0)
+            n_sensor_aux += images.size(0)
+
+        if beta_vision_aux > 0.0 and out.get("pred_vision_aux") is not None:
+            vision_aux_loss = criterion(out["pred_vision_aux"], target)
+            loss = loss + beta_vision_aux * vision_aux_loss
+            vision_aux_loss_val = vision_aux_loss.item()
+
+            vision_aux_pred_um = predictions_to_um(out["pred_vision_aux"].detach())
+            batch_vision_aux_mae = torch.abs(vision_aux_pred_um - target_um).mean().item()
+            total_vision_aux_mae += batch_vision_aux_mae * images.size(0)
+            n_vision_aux += images.size(0)
+
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
@@ -348,15 +383,28 @@ def train_one_epoch(
         bsz       = images.size(0)
 
         total_loss += loss.item() * bsz
+        total_fused_loss += fused_loss.item() * bsz
+        total_sensor_aux_loss += sensor_aux_loss_val * bsz
+        total_vision_aux_loss += vision_aux_loss_val * bsz
         total_mae  += batch_mae  * bsz
         n          += bsz
 
         if log_every > 0 and step % log_every == 0:
             lr = optimizer.param_groups[0]["lr"]
             print(f"    step {step:04d}/{len(loader)}  "
-                  f"loss={loss.item():.5f}  mae={batch_mae:.1f}µm  lr={lr:.2e}")
+                  f"loss={loss.item():.5f}  fused={fused_loss.item():.5f}  "
+                  f"sensor_aux={sensor_aux_loss_val:.5f}  vision_aux={vision_aux_loss_val:.5f}  "
+                  f"mae={batch_mae:.1f}µm  lr={lr:.2e}")
 
-    return {"loss": total_loss / max(n, 1), "mae_um": total_mae / max(n, 1)}
+    return {
+        "loss": total_loss / max(n, 1),
+        "fused_loss": total_fused_loss / max(n, 1),
+        "sensor_aux_loss": total_sensor_aux_loss / max(n, 1),
+        "vision_aux_loss": total_vision_aux_loss / max(n, 1),
+        "mae_um": total_mae / max(n, 1),
+        "sensor_aux_mae_um": total_sensor_aux_mae / max(n_sensor_aux, 1) if n_sensor_aux > 0 else math.nan,
+        "vision_aux_mae_um": total_vision_aux_mae / max(n_vision_aux, 1) if n_vision_aux > 0 else math.nan,
+    }
 
 
 @torch.no_grad()
@@ -366,10 +414,19 @@ def evaluate(
     criterion:   nn.Module,
     device:      torch.device,
     use_sensors: bool,
+    alpha_sensor_aux: float,
+    beta_vision_aux: float,
 ) -> dict[str, Any]:
     model.eval()
     all_pred, all_target, all_types = [], [], []
     total_loss = 0.0
+    total_fused_loss = 0.0
+    total_sensor_aux_loss = 0.0
+    total_vision_aux_loss = 0.0
+    total_sensor_aux_mae = 0.0
+    total_vision_aux_mae = 0.0
+    n_sensor_aux = 0
+    n_vision_aux = 0
     n = 0
 
     for batch in loader:
@@ -381,8 +438,32 @@ def evaluate(
         if use_sensors:
             sensor_features = batch["sensor_features"].to(device, non_blocking=True)
 
-        out  = model(images, sensor_features)
-        loss = criterion(out["wear"], target)
+        out = model(images, sensor_features)
+        fused_loss = criterion(out["wear"], target)
+        loss = fused_loss
+
+        sensor_aux_loss_val = 0.0
+        vision_aux_loss_val = 0.0
+
+        if alpha_sensor_aux > 0.0 and out.get("pred_sensor_aux") is not None:
+            sensor_aux_loss = criterion(out["pred_sensor_aux"], target)
+            loss = loss + alpha_sensor_aux * sensor_aux_loss
+            sensor_aux_loss_val = sensor_aux_loss.item()
+
+            sensor_aux_pred_um = predictions_to_um(out["pred_sensor_aux"])
+            batch_sensor_aux_mae = torch.abs(sensor_aux_pred_um - batch["wear_raw"].to(device, non_blocking=True)).mean().item()
+            total_sensor_aux_mae += batch_sensor_aux_mae * images.size(0)
+            n_sensor_aux += images.size(0)
+
+        if beta_vision_aux > 0.0 and out.get("pred_vision_aux") is not None:
+            vision_aux_loss = criterion(out["pred_vision_aux"], target)
+            loss = loss + beta_vision_aux * vision_aux_loss
+            vision_aux_loss_val = vision_aux_loss.item()
+
+            vision_aux_pred_um = predictions_to_um(out["pred_vision_aux"])
+            batch_vision_aux_mae = torch.abs(vision_aux_pred_um - batch["wear_raw"].to(device, non_blocking=True)).mean().item()
+            total_vision_aux_mae += batch_vision_aux_mae * images.size(0)
+            n_vision_aux += images.size(0)
 
         all_pred.append(predictions_to_um(out["wear"]).cpu().numpy())
         all_target.append(target_um)
@@ -390,17 +471,34 @@ def evaluate(
 
         bsz        = images.size(0)
         total_loss += loss.item() * bsz
+        total_fused_loss += fused_loss.item() * bsz
+        total_sensor_aux_loss += sensor_aux_loss_val * bsz
+        total_vision_aux_loss += vision_aux_loss_val * bsz
         n          += bsz
 
     if not all_pred:
         empty = {f"mae_{wt}_um": math.nan for wt in WEAR_TYPES}
-        empty.update({"mae_overall_um": math.nan, "n_total": 0, "loss": math.nan})
+        empty.update({
+            "mae_overall_um": math.nan,
+            "n_total": 0,
+            "loss": math.nan,
+            "fused_loss": math.nan,
+            "sensor_aux_loss": math.nan,
+            "vision_aux_loss": math.nan,
+            "sensor_aux_mae_um": math.nan,
+            "vision_aux_mae_um": math.nan,
+        })
         return empty
 
     metrics = compute_mae(np.concatenate(all_pred),
                           np.concatenate(all_target),
                           all_types)
     metrics["loss"] = total_loss / max(n, 1)
+    metrics["fused_loss"] = total_fused_loss / max(n, 1)
+    metrics["sensor_aux_loss"] = total_sensor_aux_loss / max(n, 1)
+    metrics["vision_aux_loss"] = total_vision_aux_loss / max(n, 1)
+    metrics["sensor_aux_mae_um"] = total_sensor_aux_mae / max(n_sensor_aux, 1) if n_sensor_aux > 0 else math.nan
+    metrics["vision_aux_mae_um"] = total_vision_aux_mae / max(n_vision_aux, 1) if n_vision_aux > 0 else math.nan
     return metrics
 
 
@@ -416,6 +514,10 @@ def run_experiment(
     print(f"  EXPERIMENT: {cfg.name}")
     print(f"  fusion={cfg.fusion_mode}  features={cfg.feature_set}  "
           f"sensors={cfg.use_sensors}  loss={cfg.loss}  lr={cfg.lr}")
+    print(f"  aux weights: alpha_sensor_aux={args.alpha_sensor_aux}  "
+          f"beta_vision_aux={args.beta_vision_aux}  "
+          f"sensor_aux_head={args.enable_sensor_aux_head}  "
+          f"vision_aux_head={args.enable_vision_aux_head}")
     print(f"{'='*80}")
 
     run_dir = output_dir / cfg.name
@@ -443,6 +545,8 @@ def run_experiment(
         use_sensors        = cfg.use_sensors,
         pretrained         = not args.no_pretrained,
         dropout_backbone   = cfg.dropout_backbone,
+        enable_sensor_aux_head = args.enable_sensor_aux_head,
+        enable_vision_aux_head = args.enable_vision_aux_head,
     )
     if cfg.use_sensors:
         model_kwargs.update(
@@ -464,6 +568,9 @@ def run_experiment(
 
     criterion = nn.MSELoss()
     print(f"  Loss: {cfg.loss} → {criterion}")
+    print(f"  Total objective: L_total = L_fused + "
+          f"{args.alpha_sensor_aux}*L_sensor_aux + "
+          f"{args.beta_vision_aux}*L_vision_aux")
 
     # ── Training loop ─────────────────────────────────────────────────────────
     history:     list[dict] = []
@@ -476,10 +583,15 @@ def run_experiment(
 
         train_m = train_one_epoch(
             model, loaders["train"], optimizer, criterion,
-            device, cfg.use_sensors, log_every=args.log_every,
+            device, cfg.use_sensors,
+            alpha_sensor_aux=args.alpha_sensor_aux,
+            beta_vision_aux=args.beta_vision_aux,
+            log_every=args.log_every,
         )
         val_m = evaluate(
             model, loaders["val"], criterion, device, cfg.use_sensors,
+            alpha_sensor_aux=args.alpha_sensor_aux,
+            beta_vision_aux=args.beta_vision_aux,
         )
         elapsed = time.time() - t0
 
@@ -487,20 +599,40 @@ def run_experiment(
 
         print(
             f"  [{epoch:02d}/{cfg.epochs}]  "
-            f"train loss={train_m['loss']:.5f} mae={train_m['mae_um']:.1f}µm  |  "
+            f"train total={train_m['loss']:.5f} fused={train_m['fused_loss']:.5f} "
+            f"s_aux={train_m['sensor_aux_loss']:.5f} v_aux={train_m['vision_aux_loss']:.5f} "
+            f"mae={train_m['mae_um']:.1f}µm  |  "
             f"val {fmt_metrics(val_m)}  "
+            f"(total={val_m['loss']:.5f}, fused={val_m['fused_loss']:.5f}, "
+            f"s_aux={val_m['sensor_aux_loss']:.5f}, v_aux={val_m['vision_aux_loss']:.5f})  "
             f"lr={lr_now:.2e}  ({elapsed:.1f}s)"
         )
+
+        sensor_aux_mae_str = (f"{val_m['sensor_aux_mae_um']:.2f}"
+                              if not math.isnan(val_m["sensor_aux_mae_um"]) else "nan")
+        vision_aux_mae_str = (f"{val_m['vision_aux_mae_um']:.2f}"
+                              if not math.isnan(val_m["vision_aux_mae_um"]) else "nan")
+        print(f"             aux_mae_um: sensor={sensor_aux_mae_str}  vision={vision_aux_mae_str}")
 
         history.append({
             "epoch":                          epoch,
             "train_loss":                     train_m["loss"],
+            "train_fused_loss":               train_m["fused_loss"],
+            "train_sensor_aux_loss":          train_m["sensor_aux_loss"],
+            "train_vision_aux_loss":          train_m["vision_aux_loss"],
             "train_mae_um":                   train_m["mae_um"],
+            "train_sensor_aux_mae_um":        train_m["sensor_aux_mae_um"],
+            "train_vision_aux_mae_um":        train_m["vision_aux_mae_um"],
             "val_loss":                       val_m["loss"],
+            "val_fused_loss":                 val_m["fused_loss"],
+            "val_sensor_aux_loss":            val_m["sensor_aux_loss"],
+            "val_vision_aux_loss":            val_m["vision_aux_loss"],
             "val_mae_overall_um":             val_m["mae_overall_um"],
             "val_mae_flank_wear_um":          val_m["mae_flank_wear_um"],
             "val_mae_adhesion_um":            val_m["mae_adhesion_um"],
             "val_mae_flank_wear+adhesion_um": val_m["mae_flank_wear+adhesion_um"],
+            "val_sensor_aux_mae_um":          val_m["sensor_aux_mae_um"],
+            "val_vision_aux_mae_um":          val_m["vision_aux_mae_um"],
             "lr":                             lr_now,
             "seconds":                        elapsed,
         })
@@ -528,15 +660,32 @@ def run_experiment(
     print(f"\n  --- Final results: {cfg.name} ---")
     final_results: dict[str, dict] = {}
     for split in [k for k in ("val", "test") if k in loaders]:
-        m = evaluate(model, loaders[split], criterion, device, cfg.use_sensors)
+        m = evaluate(
+            model, loaders[split], criterion, device, cfg.use_sensors,
+            alpha_sensor_aux=args.alpha_sensor_aux,
+            beta_vision_aux=args.beta_vision_aux,
+        )
         final_results[split] = m
+        sensor_aux_mae_str = (f"{m['sensor_aux_mae_um']:.2f}"
+                              if not math.isnan(m["sensor_aux_mae_um"]) else "nan")
+        vision_aux_mae_str = (f"{m['vision_aux_mae_um']:.2f}"
+                              if not math.isnan(m["vision_aux_mae_um"]) else "nan")
         print(f"  [{split:7s}] {fmt_metrics(m)}")
+        print(f"            losses: total={m['loss']:.5f} fused={m['fused_loss']:.5f} "
+              f"s_aux={m['sensor_aux_loss']:.5f} v_aux={m['vision_aux_loss']:.5f}")
+        print(f"            aux_mae_um: sensor={sensor_aux_mae_str}  vision={vision_aux_mae_str}")
 
     # ── Save results ──────────────────────────────────────────────────────────
     with open(run_dir / "results.json", "w") as fh:
         json.dump({
             "experiment":      cfg.name,
             "config":          cfg.__dict__,
+            "aux_objective": {
+                "alpha_sensor_aux": args.alpha_sensor_aux,
+                "beta_vision_aux": args.beta_vision_aux,
+                "sensor_aux_head_enabled": args.enable_sensor_aux_head,
+                "vision_aux_head_enabled": args.enable_vision_aux_head,
+            },
             "best_epoch":      best_epoch,
             "best_val_mae_um": best_val_mae,
             "splits": {
@@ -634,6 +783,16 @@ def build_parser() -> argparse.ArgumentParser:
                    choices=["auto", "cpu", "cuda", "mps"])
     p.add_argument("--no-pretrained",    action="store_true")
     p.add_argument("--log-every",        type=int,   default=0)
+
+    # Option 1: auxiliary unimodal losses
+    p.add_argument("--alpha-sensor-aux", type=float, default=0.0,
+                   help="Weight alpha for sensor auxiliary loss.")
+    p.add_argument("--beta-vision-aux", type=float, default=0.0,
+                   help="Weight beta for vision auxiliary loss.")
+    p.add_argument("--enable-sensor-aux-head", action="store_true",
+                   help="Enable sensor auxiliary head in the model.")
+    p.add_argument("--enable-vision-aux-head", action="store_true",
+                   help="Enable vision auxiliary head in the model.")
     return p
 
 
