@@ -40,45 +40,25 @@ _HERE = Path(__file__).resolve().parent
 def _load_module(name: str, candidates: list[Path]):
     for path in candidates:
         if path.exists():
-            print(f"[_load_module] {name} <- {path}")
             spec = importlib.util.spec_from_file_location(name, path)
             mod = importlib.util.module_from_spec(spec)
             sys.modules[name] = mod
             spec.loader.exec_module(mod)
             return mod
-    raise FileNotFoundError(f"Could not find '{name}'. Searched:\n  "
-                            + "\n  ".join(str(p) for p in candidates))
+    raise FileNotFoundError(f"Could not find '{name}'. Searched: "
+                            + ", ".join(str(p) for p in candidates))
 
-# We need the TASK-3 sensor training script — the one with gated fusion and the
-# ALL_EXPERIMENTS/t3_gated_top25_md30 grid — NOT the original Stage-2
-# train_vision_sensor.py (which only has DEFAULT_EXPERIMENTS). On the cluster the
-# task-3 file is vision-sensor/improve_attempt/train_vision_sensorV2.py. Search the
-# V2 name first; the bare Stage-2 file is the last resort and is rejected below.
+# train_vision_sensor.py is looked up locally, then in the sibling
+# vision-sensor/ dir where the Stage-2/task-3 files live. Loaded from there,
+# it self-resolves its own model/dataset deps, so nothing needs copying into
+# pinn/.
 _TVS = _load_module("train_vision_sensor_base", [
-    _HERE / "train_vision_sensorV2.py",
     _HERE / "train_vision_sensor.py",
-    _HERE / ".." / "vision-sensor" / "improve_attempt" / "train_vision_sensorV2.py",
-    _HERE / ".." / "vision-sensor" / "improve_attempt" / "train_vision_sensor.py",
-    _HERE / ".." / "vision-sensor" / "train_vision_sensorV2.py",
     _HERE / ".." / "vision-sensor" / "train_vision_sensor.py",
 ])
 _TPL = _load_module("taylor_physics_loss", [
     _HERE / "taylor_physics_loss.py",
 ])
-
-# Guard: refuse the Stage-2 script (no task-3 grid) with an actionable message
-# instead of a cryptic AttributeError further down.
-if not hasattr(_TVS, "ALL_EXPERIMENTS"):
-    raise SystemExit(
-        "ERROR: the sensor training script loaded above has no ALL_EXPERIMENTS — "
-        "it is the Stage-2 version, without gated fusion / the task-3 grid.\n"
-        "Use the task-3 script (train_vision_sensorV2.py, the one containing "
-        "'t3_gated_top25_md30' and 'gated' fusion). Either:\n"
-        "  (a) make sure vision-sensor/improve_attempt/train_vision_sensorV2.py exists, or\n"
-        "  (b) copy that file + modelVisionSensorV2.py + DatasetClass_VisionSensors.py "
-        "into pinn/.\n"
-        "The [_load_module] line above shows which file was picked."
-    )
 
 MATWIMultimodalModel = _TVS.MATWIMultimodalModel
 build_loaders        = _TVS.build_loaders
@@ -87,15 +67,19 @@ predictions_to_um    = _TVS.predictions_to_um
 fmt_metrics          = _TVS.fmt_metrics
 set_seed             = _TVS.set_seed
 resolve_device       = _TVS.resolve_device
-ALL_EXPERIMENTS      = _TVS.ALL_EXPERIMENTS
+# The fusion trainer exposes its experiment grid as DEFAULT_EXPERIMENTS.
+# (Older drafts referenced ALL_EXPERIMENTS / a gated-fusion variant that does
+# not exist in this repo; kept a fallback so either name works.)
+DEFAULT_EXPERIMENTS  = getattr(_TVS, "DEFAULT_EXPERIMENTS",
+                               getattr(_TVS, "ALL_EXPERIMENTS", []))
 TaylorPhysicsLoss    = _TPL.TaylorPhysicsLoss
 
 
 def _get_base_cfg(name: str):
-    for cfg in ALL_EXPERIMENTS:
+    for cfg in DEFAULT_EXPERIMENTS:
         if cfg.name == name:
             return cfg
-    avail = [c.name for c in ALL_EXPERIMENTS]
+    avail = [c.name for c in DEFAULT_EXPERIMENTS]
     raise SystemExit(f"--base-exp '{name}' not found. Available: {avail}")
 
 
@@ -141,7 +125,8 @@ def train_one_epoch_taylor(model, loader, optimizer, data_criterion, physics_los
 def run(base_cfg, args, device, out_dir: Path, name: str) -> None:
     print(f"\n{'='*80}\n  STAGE 3 FUSION: {name}")
     print(f"  base={base_cfg.name} (fusion={base_cfg.fusion_mode}, "
-          f"features={base_cfg.feature_set}, mdrop={base_cfg.modality_dropout_p})")
+          f"features={base_cfg.feature_set}, "
+          f"gate_aircuts={getattr(base_cfg, 'gate_aircuts', False)})")
     print(f"  physics: lambda_max={args.lambda_max} warmup={args.warmup} "
           f"apply_to={args.apply_to} one_sided={args.one_sided} "
           f"taylor_slope={args.use_taylor_slope}\n{'='*80}")
@@ -160,19 +145,16 @@ def run(base_cfg, args, device, out_dir: Path, name: str) -> None:
                         dropout_backbone=base_cfg.dropout_backbone)
     if base_cfg.use_sensors:
         model_kwargs.update(fusion_mode=base_cfg.fusion_mode, n_sensor_features=n_feat,
-                            sensor_encoder_dim=base_cfg.sensor_encoder_dim,
-                            modality_dropout_p=base_cfg.modality_dropout_p)
+                            sensor_encoder_dim=base_cfg.sensor_encoder_dim)
     model = MATWIMultimodalModel(**model_kwargs).to(device)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=base_cfg.lr,
                                   weight_decay=base_cfg.weight_decay)   # fixed LR, no scheduler
     data_criterion = nn.MSELoss()
     physics_loss = TaylorPhysicsLoss(
-        constants_path=args.constants, lambda_max=max(args.lambda_max, 1e-9),
+        constants_path=args.constants, lambda_max=args.lambda_max,
         warmup_epochs=args.warmup, apply_to=args.apply_to,
         one_sided=args.one_sided, use_taylor_slope=args.use_taylor_slope)
-    if args.lambda_max <= 0.0:
-        physics_loss.lambda_max = 0.0
     print(f"  PhysicsLoss: {physics_loss.extra_repr()}")
 
     history, best_state, best_val, best_ep = [], None, float("inf"), -1
@@ -182,8 +164,13 @@ def run(base_cfg, args, device, out_dir: Path, name: str) -> None:
                                     physics_loss, device, base_cfg.use_sensors,
                                     epoch0=epoch-1, log_every=args.log_every)
         val = evaluate(model, loaders["val"], data_criterion, device, base_cfg.use_sensors)
+        # gate_mean is only meaningful for gated-fusion models that expose
+        # out["gate"]; the current fusion model does not, so it is nan — omit it.
+        gate_str = (f"gate={tr['gate_mean']:.3f} "
+                    if tr.get("gate_mean") == tr.get("gate_mean")  # not nan
+                    and tr.get("gate_mean") is not None else "")
         print(f"  [{epoch:02d}/{base_cfg.epochs}] data={tr['data_loss']:.5f} "
-              f"phys={tr['phys_loss']:.6f} gate={tr['gate_mean']:.3f} "
+              f"phys={tr['phys_loss']:.6f} {gate_str}"
               f"train_mae={tr['mae_um']:.1f}µm | val {fmt_metrics(val)} ({time.time()-t0:.1f}s)")
         history.append({"epoch": epoch, **{f"train_{k}": v for k, v in tr.items()},
                         "val_mae_overall_um": val["mae_overall_um"],
@@ -218,23 +205,26 @@ def run(base_cfg, args, device, out_dir: Path, name: str) -> None:
 
 
 def main():
-    p = argparse.ArgumentParser(description="MATWI Stage 3: gated fusion + Taylor physics loss.")
+    p = argparse.ArgumentParser(description="MATWI Stage 3: fusion + Taylor physics loss.")
     p.add_argument("--data-dir",   type=Path, required=True)
     p.add_argument("--labels-csv", type=Path, required=True)
     p.add_argument("--sets-csv",   type=Path, required=True)
     p.add_argument("--output-dir", type=Path, required=True)
     p.add_argument("--constants",  type=Path, required=True)
-    p.add_argument("--name",       type=str,  default="t3gated_taylor")
-    p.add_argument("--base-exp",   type=str,  default="t3_gated_top25_md30",
-                   help="config name from train_vision_sensor.py to build on")
-    p.add_argument("--epochs",     type=int,  default=0,
-                   help="override the base config's epoch count (0 = keep base, =17)")
+    p.add_argument("--name",       type=str,  default="t3fusion_taylor")
+    p.add_argument("--base-exp",   type=str,  default="intermediate_top25",
+                   help="config name from train_vision_sensor.py DEFAULT_EXPERIMENTS "
+                        "to build on (e.g. intermediate_top25, early_top25)")
     # physics knobs
     p.add_argument("--lambda-max", type=float, default=0.05, help="0 => fusion control, no physics")
     p.add_argument("--warmup",     type=int,   default=4)
     p.add_argument("--apply-to",   type=str,   default="all", choices=["all", "rvs", "ck45"])
     p.add_argument("--one-sided",  action="store_true")
     p.add_argument("--use-taylor-slope", action="store_true")
+    # air-cut gating: compute sensor features on the tool-engaged window only
+    p.add_argument("--gate-aircuts", action="store_true",
+                   help="remove tool-approach/retraction (air-cut) phases before "
+                        "sensor feature extraction (uses relative band energy)")
     # misc
     p.add_argument("--num-workers", type=int, default=4)
     p.add_argument("--seed",        type=int, default=42)
@@ -246,10 +236,13 @@ def main():
     args.output_dir.mkdir(parents=True, exist_ok=True)
     set_seed(args.seed)
     device = resolve_device(args.device)
-    base_cfg = _get_base_cfg(args.base_exp)
-    if args.epochs:
-        base_cfg.epochs = args.epochs
-    print(f"Device {device} | seed {args.seed} | epochs {base_cfg.epochs} | out {args.output_dir.resolve()}")
+    base_cfg = deepcopy(_get_base_cfg(args.base_exp))   # copy: don't mutate the grid
+    # Apply the air-cut flag onto the chosen base config (ExperimentConfig now
+    # carries gate_aircuts; older configs without it still work via setattr).
+    if args.gate_aircuts:
+        setattr(base_cfg, "gate_aircuts", True)
+    print(f"Device {device} | seed {args.seed} | gate_aircuts={args.gate_aircuts} "
+          f"| out {args.output_dir.resolve()}")
     run(base_cfg, args, device, args.output_dir.resolve(), args.name)
 
 

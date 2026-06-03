@@ -5,7 +5,7 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
 #SBATCH --time=01:00:00
-#SBATCH --array=0-9
+#SBATCH --array=0-12
 #SBATCH --output=/scratch-shared/your_username/name_of_project_folder/runs/sensor_ablation/logs/sensor_%A_%a.out
 #SBATCH --error=/scratch-shared/your_username/name_of_project_folder/runs/sensor_ablation/logs/sensor_%A_%a.err
 
@@ -20,16 +20,19 @@ source /scratch-shared/your_username/name_of_project_folder/name_of_environment_
 
 # ── Experiment mapping ────────────────────────────────────────────────────────
 EXPERIMENTS=(
-    "vision_only_647"       # 0
-    "early_raw25"           # 1
-    "early_top25"           # 2
-    "early_all40"           # 3
-    "intermediate_raw25"    # 4
-    "intermediate_top25"    # 5
-    "intermediate_all40"    # 6
-    "late_raw25"            # 7
-    "late_top25"            # 8
-    "late_all40"            # 9
+    "vision_only_647"            # 0
+    "early_raw25"                # 1
+    "early_top25"                # 2
+    "early_all40"                # 3
+    "intermediate_raw25"         # 4
+    "intermediate_top25"         # 5
+    "intermediate_all40"         # 6
+    "late_raw25"                 # 7
+    "late_top25"                 # 8
+    "late_all40"                 # 9
+    "intermediate_top25_gated"   # 10  air-cut ablation
+    "early_top25_gated"          # 11  air-cut ablation
+    "intermediate_all40_gated"   # 12  air-cut ablation
 )
 
 EXP_NAME="${EXPERIMENTS[$SLURM_ARRAY_TASK_ID]}"

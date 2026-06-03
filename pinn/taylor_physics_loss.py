@@ -13,6 +13,9 @@ mid-life"):
     where (a_s, b_s) is the frozen, spike-robust mid-life line fit offline
     (fit_taylor.py). Optionally b_s is replaced by the Taylor-predicted slope
     W_f / T_taylor(Vc_s) so that the cross-set rate ordering obeys Vc·T^n = C.
+    When the Taylor slope is used, a_s is replaced by `taylor_intercept_um`
+    (re-fit with the Taylor slope fixed) so the line still passes through the
+    data — using `intercept_um` with a different slope would be inconsistent.
 
     L_physics = mean_i [ w_i · pen( VB_pred_i − VB_expected_i )^2 ]   (normalised /1000)
     pen(x) = x                (symmetric, default)
@@ -20,13 +23,22 @@ mid-life"):
     L_total   = L_data + λ(epoch) · L_physics
 
 Guardrails baked in:
-    • Set 1 excluded (unknown cutting params).
-    • Penalty applied ONLY inside the per-set mid-life window [15%, 85%] of the
-      run — respects break-in / catastrophic-failure non-linearity and the
-      early-stop distortion.
+    • Excluded sets are read from the JSON meta (default {1}: unknown cutting
+      params). Falls back to {1} for older JSONs that don't store the list.
+    • Penalty applied ONLY inside the per-set mid-life window. The window
+      fraction defaults to the JSON `meta["window"]` (set at fit time);
+      passing `window=(lo, hi)` to the constructor OVERRIDES the fraction
+      and re-derives per-set [lo·t_max, hi·t_max] from each set's
+      `max_image_id`.
     • Caution sets (6 variable feed, 17 z=2) down-weighted.
-    • Material gating: enforce on RVS only / CK45 only / both.
+    • Material gating: enforce on RVS only / CK45 only / both. Materials are
+      encoded once at __init__ time into integer codes, so the per-batch loop
+      never compares strings.
     • λ linear warm-up so physics does not dominate before the backbone settles.
+
+Implementation: per-set parameters (slope, intercept, window bounds, weight,
+material code) are precomputed into 1-D buffers indexed by set id, and the
+forward pass is fully vectorised — no Python loop over batch samples.
 
 This module loads the frozen constants produced by fit_taylor.py. It never
 learns n / C / slopes (supervisors: learnable constants make it "no longer a
@@ -36,14 +48,28 @@ hybrid approach").
 from __future__ import annotations
 import json
 from pathlib import Path
-from typing import Dict, Optional, Sequence
-import numpy as np
+from typing import Optional, Sequence
 
+import numpy as np
 import torch
 import torch.nn as nn
 
 WEAR_DIVISOR = 1000.0
-PHYSICS_EXCLUDED_SETS = {1}
+
+# Canonical material strings (must match DatasetClass_VisionSensors.py).
+# Encoded as integer codes (CK45=0, RVS=1, unknown=-1) at __init__ time so the
+# forward pass works on tensors and never compares strings.
+MATERIAL_CK45 = "CK45"
+MATERIAL_RVS  = "RVS 304"
+_MAT_CODE_CK45 = 0
+_MAT_CODE_RVS  = 1
+_MAT_CODE_UNKNOWN = -1
+
+
+def _material_to_code(mat: str) -> int:
+    if mat == MATERIAL_CK45: return _MAT_CODE_CK45
+    if mat == MATERIAL_RVS:  return _MAT_CODE_RVS
+    return _MAT_CODE_UNKNOWN
 
 
 class TaylorPhysicsLoss(nn.Module):
@@ -69,34 +95,100 @@ class TaylorPhysicsLoss(nn.Module):
         self.constants  = payload["constants"]
         self.set_recs   = {int(k): v for k, v in payload["sets"].items()}
         self.failure_um = float(self.meta["failure_um"])
-        self.win_lo, self.win_hi = window or tuple(self.meta["window"])
-        self.lambda_max     = lambda_max
-        self.warmup_epochs  = max(1, warmup_epochs)
-        self.apply_to       = apply_to.lower()
-        self.one_sided      = one_sided
-        self.use_taylor_slope = use_taylor_slope
-        self.caution_weight = caution_weight
-        self.caution_sets   = set(self.meta.get("caution_sets", []))
 
-        assert self.apply_to in ("all", "rvs", "ck45")
-        assert 0 < self.lambda_max <= 10.0
+        # Window fraction: override > JSON > (0.15, 0.85) safety default.
+        json_window = tuple(self.meta.get("window", (0.15, 0.85)))
+        self.win_lo, self.win_hi = window if window is not None else json_window
+        if not (0.0 <= self.win_lo < self.win_hi <= 1.0):
+            raise ValueError(
+                f"window fractions must satisfy 0 <= lo < hi <= 1, "
+                f"got ({self.win_lo}, {self.win_hi})"
+            )
+
+        self.lambda_max       = lambda_max
+        self.warmup_epochs    = max(1, warmup_epochs)
+        self.apply_to         = apply_to.lower()
+        self.one_sided        = one_sided
+        self.use_taylor_slope = use_taylor_slope
+        self.caution_weight   = caution_weight
+
+        # Excluded / caution set lists from JSON meta (falls back to {1}
+        # for older constants files that pre-date storing these).
+        self.excluded_sets = set(self.meta.get("excluded_sets", [1]))
+        self.caution_sets  = set(self.meta.get("caution_sets",  []))
+
+        if self.apply_to not in ("all", "rvs", "ck45"):
+            raise ValueError(f"apply_to must be 'all'/'rvs'/'ck45', got {apply_to!r}")
+        if not (0.0 <= self.lambda_max <= 10.0):
+            raise ValueError(f"lambda_max must be in [0, 10], got {self.lambda_max}")
+
+        self._build_lookup_tables()
+
+    # ── Per-set lookup tables (1-D buffers indexed by set id) ────────────────
+    def _build_lookup_tables(self) -> None:
+        """Precompute per-set (slope, intercept, win_lo_id, win_hi_id,
+        weight, material_code, valid) into buffers. Missing or excluded
+        sets get valid=False so they contribute zero to the loss."""
+        max_set = max(self.set_recs.keys()) + 1 if self.set_recs else 1
+
+        slope    = np.zeros(max_set, dtype=np.float32)
+        intcpt   = np.zeros(max_set, dtype=np.float32)
+        win_lo   = np.full(max_set,  np.inf,  dtype=np.float32)   # never inside
+        win_hi   = np.full(max_set, -np.inf,  dtype=np.float32)
+        weight   = np.zeros(max_set, dtype=np.float32)
+        mat_code = np.full(max_set, _MAT_CODE_UNKNOWN, dtype=np.int64)
+        valid    = np.zeros(max_set, dtype=bool)
+
+        for s, rec in self.set_recs.items():
+            if s in self.excluded_sets:
+                continue
+
+            # Slope + intercept: keep observed pair, or swap to Taylor-anchored
+            # pair when use_taylor_slope=True AND a Taylor slope is available.
+            taylor_slope = rec.get("taylor_slope_um_per_pass")
+            taylor_icpt  = rec.get("taylor_intercept_um")
+            use_taylor   = (
+                self.use_taylor_slope
+                and taylor_slope is not None
+                and taylor_icpt  is not None
+                and float(taylor_slope) > 0.0
+            )
+            if use_taylor:
+                slope[s]  = float(taylor_slope)
+                intcpt[s] = float(taylor_icpt)
+            else:
+                slope[s]  = float(rec["slope_um_per_pass"])
+                intcpt[s] = float(rec["intercept_um"])
+
+            # Window: re-derive from the (possibly overridden) fraction
+            # using the per-set max_image_id stored in the JSON.
+            t_max = float(rec.get("max_image_id", 0.0))
+            win_lo[s] = self.win_lo * t_max
+            win_hi[s] = self.win_hi * t_max
+
+            weight[s]   = self.caution_weight if s in self.caution_sets else 1.0
+            mat_code[s] = _material_to_code(rec["material"])
+            valid[s]    = True
+
+        self.register_buffer("_slope",    torch.from_numpy(slope))
+        self.register_buffer("_intercept", torch.from_numpy(intcpt))
+        self.register_buffer("_win_lo",   torch.from_numpy(win_lo))
+        self.register_buffer("_win_hi",   torch.from_numpy(win_hi))
+        self.register_buffer("_weight",   torch.from_numpy(weight))
+        self.register_buffer("_mat_code", torch.from_numpy(mat_code))
+        self.register_buffer("_valid",    torch.from_numpy(valid))
 
     # ── λ warm-up ────────────────────────────────────────────────────────────
     def get_lambda(self, epoch: int) -> float:
         return self.lambda_max * min(1.0, (epoch + 1) / self.warmup_epochs)
 
-    def _material_ok(self, mat: str) -> bool:
-        if self.apply_to == "all":  return True
-        if self.apply_to == "rvs":  return mat == "RVS 304"
-        return mat == "CK45"
-
-    # ── forward ──────────────────────────────────────────────────────────────
+    # ── forward (fully vectorised) ───────────────────────────────────────────
     def forward(
         self,
         pred_norm: torch.Tensor,                 # (B,) or (B,1) in [0,1]
         set_ids:   Sequence[int] | torch.Tensor, # (B,)
         image_ids: Sequence[int] | torch.Tensor, # (B,)
-        materials: Sequence[str],                # (B,)
+        materials: Sequence[str],                # (B,) — unused (encoded at init)
         epoch:     int,
     ) -> torch.Tensor:
         lam = self.get_lambda(epoch)
@@ -104,52 +196,52 @@ class TaylorPhysicsLoss(nn.Module):
         if lam == 0.0:
             return pred.sum() * 0.0
 
-        if isinstance(set_ids, torch.Tensor):   set_ids = set_ids.tolist()
-        if isinstance(image_ids, torch.Tensor): image_ids = image_ids.tolist()
+        dev = pred.device
+        dt  = pred.dtype
 
-        dev, dt = pred.device, pred.dtype
-        idxs, exp_um, weights = [], [], []
-        for i in range(pred.shape[0]):
-            s = int(set_ids[i]); mat = materials[i]; t = float(image_ids[i])
-            rec = self.set_recs.get(s)
-            if rec is None or s in PHYSICS_EXCLUDED_SETS:        continue
-            if not self._material_ok(mat):                      continue
-            if not (rec["window_lo_id"] <= t <= rec["window_hi_id"]):  continue
-            if self.use_taylor_slope and rec.get("taylor_slope_um_per_pass"):
-                # Pulls the pre-calculated extended slope directly from the fresh JSON file
-                slope = rec["taylor_slope_um_per_pass"]
-            elif self.use_taylor_slope:
-                # --- MODIFIED: Live multi-variable backup calculator ---
-                # Extracts the multi-variable exponents dynamically if not found in the record
-                n_val = self.constants.get(mat, {}).get("n", 0.25)
-                m_val = self.constants.get(mat, {}).get("m", 0.0)
-                C_val = self.constants.get(mat, {}).get("C", 300.0)
-                
-                vc = rec.get("Vc", 174.0)
-                fz = rec.get("fz", 0.05)
-                
-                log_T = (np.log(C_val) - np.log(vc) - m_val * np.log(fz)) / n_val
-                t_life = np.exp(log_T)
-                slope = self.failure_um / t_life
-            else:
-                slope = rec["slope_um_per_pass"]
+        # Coerce ids to tensors on the same device.
+        if not isinstance(set_ids, torch.Tensor):
+            set_ids = torch.as_tensor(set_ids, dtype=torch.long, device=dev)
+        sids = set_ids.to(device=dev, dtype=torch.long)
+        if not isinstance(image_ids, torch.Tensor):
+            image_ids = torch.as_tensor(image_ids, dtype=dt, device=dev)
+        iids = image_ids.to(device=dev, dtype=dt)
 
-            vb = slope * t + rec["intercept_um"]
-            vb = min(max(vb, 0.0), self.failure_um)
-            idxs.append(i)
-            exp_um.append(vb)
-            weights.append(self.caution_weight if s in self.caution_sets else 1.0)
+        # Clamp to lookup range so out-of-table set ids (shouldn't happen) are
+        # masked out rather than indexing past the buffer.
+        in_range  = (sids >= 0) & (sids < self._slope.shape[0])
+        safe_sids = torch.where(in_range, sids, torch.zeros_like(sids))
 
-        if not idxs:
+        slope    = self._slope[safe_sids]
+        intcpt   = self._intercept[safe_sids]
+        win_lo   = self._win_lo[safe_sids]
+        win_hi   = self._win_hi[safe_sids]
+        weight   = self._weight[safe_sids]
+        mat_code = self._mat_code[safe_sids]
+        valid    = self._valid[safe_sids]
+
+        # Material gating
+        if   self.apply_to == "all":  mat_ok = torch.ones_like(valid)
+        elif self.apply_to == "rvs":  mat_ok = mat_code == _MAT_CODE_RVS
+        else:                          mat_ok = mat_code == _MAT_CODE_CK45
+
+        # Mid-life window
+        win_ok = (iids >= win_lo) & (iids <= win_hi)
+
+        use = in_range & valid & mat_ok & win_ok
+        if not use.any():
             return pred.sum() * 0.0
 
-        sel   = pred[idxs]                                   # (k,) normalised
-        exp_n = torch.tensor(exp_um, device=dev, dtype=dt) / WEAR_DIVISOR
-        w     = torch.tensor(weights, device=dev, dtype=dt)
-        diff  = sel - exp_n
+        # Expected wear trajectory, clipped to [0, W_f] and normalised
+        vb_um  = (slope * iids + intcpt).clamp(0.0, self.failure_um)
+        exp_n  = vb_um / WEAR_DIVISOR
+
+        diff = pred - exp_n
         if self.one_sided:
-            diff = torch.clamp(diff, min=0.0)                # punish overprediction only
-        physics = (w * diff.pow(2)).sum() / w.sum()
+            diff = torch.clamp(diff, min=0.0)        # punish overprediction only
+
+        w = weight * use.to(dt)
+        physics = (w * diff.pow(2)).sum() / w.sum().clamp_min(1e-12)
         return lam * physics
 
     def extra_repr(self) -> str:
