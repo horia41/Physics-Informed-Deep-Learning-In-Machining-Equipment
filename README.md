@@ -7,6 +7,10 @@ Our project follows 4 stages:
 3. **Physics-informed loss (Taylor's equation)** — add physical constraints to the model - **NEXT**
 4. **Refinement & compression** — hard constraints, pruning, quantisation for edge deployment - **NEXT**
 
+> **Maintenance note:** a round of correctness/reproducibility fixes was applied to the
+> shared pipeline (determinism, the full vision grid, held-out unseen evaluation, sensor
+> caching, etc.). See [BUGFIXES.md](BUGFIXES.md) for exactly what changed and why.
+
 ---
 
 ## 2. Dataset 
@@ -127,13 +131,15 @@ project_pinn(or however you named it)/
 - Supports 3 feature subsets: `"all40"`, `"raw25"` (time-domain only), `"top25"` 
   (best by Ridge regression importance)
 - Only keeps samples with BOTH modalities → 647 train / 300 val / 247 test
-- **NEW — `gate_aircuts` flag (air-cut removal):** when `True`, sensor features are 
+- **`gate_aircuts` flag (air-cut removal):** when `True`, sensor features are 
   computed only on the *tool-engaged* portion of each recording. Each ~50–60 s CSV 
   begins with the tool approaching the workpiece (no contact) and ends with it retracting; 
-  this "air-cut" silence is 28–46% of every recording (worst on RVS 304). An envelope 
-  detector on the acoustic + accelerometer channels (`in_cut_mask`) trims those phases 
-  before feature extraction. The 40-feature layout is unchanged, so `top25`/`raw25` and 
-  the fusion model are unaffected; the scaler is re-fit on gated features.
+  this "air-cut" silence is ~25% of every recording. A **wavelet edge-detector**
+  (`wavelet_cut_window`, adopted from the previous group's `RemoveAircuts/` notebook — db4
+  level-4 DWT on the vibration + acoustic channels, see [BUGFIXES.md](BUGFIXES.md) §10)
+  finds the single cutting window and crops to it before feature extraction. The 40-feature
+  layout is unchanged, so `top25`/`raw25` and the fusion model are unaffected; the scaler is
+  re-fit on gated features.
 - **Frequency-feature bug fix (required for gating to be valid):** the band-energy 
   features are now **relative** (`band power / total power`) instead of absolute sums. 
   Absolute energy scales with signal length — already variable across raw recordings 
@@ -168,6 +174,15 @@ project_pinn(or however you named it)/
 - Gradient clipping: max_norm=1.0
 - Best model saved by validation MAE
 - Evaluation: MAE in µm, broken down by wear type (flank, adhesion, F+A)
+- **Reproducibility (NEW):** `set_seed()` now runs cuDNN in deterministic mode
+  (`benchmark=False`) and DataLoader workers are seeded (`worker_init_fn`,
+  seeded `generator`). Runs are now repeatable, so the small (1–7 µm) MAE
+  deltas the ablations rely on reflect the design change, not RNG noise. Pass
+  `deterministic=False` to `set_seed` to re-enable cuDNN autotuning for speed.
+- **Held-out unseen split (NEW):** with `set_range="1-13"`, sets 14–17
+  (RVS 304, never in training) are now evaluated as an `unseen` generalisation
+  split. Previously this split was silently emptied by an over-eager set
+  filter (see [BUGFIXES.md](BUGFIXES.md)).
  
 ---
 
@@ -182,6 +197,12 @@ dataset-specific), loss (L1 vs MSE), head type (simple vs MLP).
  
 **What we kept fixed:** sets 1-13, 664 training images, no augmentation, LR 3e-4, 
 17 epochs, batch size 32, AdamW.
+
+> All 9 experiments below are defined in `vision-only/train_vision.py`
+> `DEFAULT_EXPERIMENTS` and can be listed with `--list-experiments`. (The four
+> EfficientNetV2 simple-head configs — including the headline
+> `efficientnetv2_dataset_MSE` — were previously missing from the script; see
+> [BUGFIXES.md](BUGFIXES.md).)
  
 **Results (test set MAE in µm, sorted by overall):**
  
@@ -291,15 +312,16 @@ dataset class (647 train) for all runs including the vision-only control.
  
 ### 5.3.1 Air-cut ablation (NEW)
 
-Each sensor recording is 28–46% "air cut" — the tool approaching and retracting with no 
+Each sensor recording is ~25% "air cut" — the tool approaching and retracting with no 
 material contact. Three gated fusion experiments were added (`intermediate_top25_gated`, 
 `early_top25_gated`, `intermediate_all40_gated`), each identical to its ungated twin except 
 `gate_aircuts=True`. They isolate whether removing air cuts helps fusion. Run them on 
 Snellius via `run_sensor_ablation.sh` (array indices 10–12) and compare `*_gated` against 
-the base name. The frequency-feature bug fix (relative band energy) ships with this change 
-and benefits the ungated runs too. *(Expectation from the sensor-only deep dive (§5.4): 
-air-cut removal sharpens flank/adhesion but can regress flank+adhesion — so the net effect 
-on fusion, whose value is in the hard adhesion cases, is an open question worth measuring.)*
+the base name. Air-cut removal now uses the **wavelet edge-detector** (§4.1, 
+[BUGFIXES.md](BUGFIXES.md) §10). *(Expectation from the sensor-only deep dive (§5.4): with 
+this detector, air-cut removal is the best sensor-only result and clearly improves 
+flank+adhesion (24.8 → 20.1 µm) — so for fusion, whose value is in the hard adhesion cases, 
+it is worth measuring whether the same F+A gain carries over.)*
 
 ### 5.3.2 Gated fusion model (V2) + air cuts (NEW)
 
@@ -312,11 +334,21 @@ features, modality dropout 0.3).
 
 Air-cut gating is wired through this model the same way as everywhere else: 
 `ExperimentConfig.gate_aircuts` → `build_loaders` → `MATWIMultimodalDataset(gate_aircuts=True)`. 
-A ready-made air-cut twin, **`t3_gated_top25_md30_gated`**, is in the grid. The Taylor 
-fusion trainer (`pinn/train_vision_sensor_taylor.py`) now defaults to `--base-exp 
-t3_gated_top25_md30` and accepts `--gate-aircuts`, and `run_taylor_fusion.sh` runs a 5-way 
-physics × air-cut grid (array 0–4: control / Taylor-sym / Taylor-ceil-RVS / control+gated / 
-Taylor-sym+gated). Run the gated model with air cuts directly via:
+A ready-made air-cut twin, **`t3_gated_top25_md30_gated`**, is in the grid.
+
+**Where the gated model lives (corrected).** The gated-fusion grid (`t3_gated_top25_md30`)
+and its air-cut twin are defined in **`train_vision_sensorV2.py`**, which ships in
+**`pinn_aircuts/`** (see [`pinn_aircuts/README_AIRCUTS.md`](pinn_aircuts/README_AIRCUTS.md))
+and `vision-sensor/improve_attempt/`. The Taylor fusion trainer in **`pinn_aircuts/`**
+is the one that defaults to `--base-exp t3_gated_top25_md30`, accepts `--gate-aircuts`,
+and runs the physics × air-cut SLURM array (`run_taylor_aircuts_17ep.sh`).
+
+The **`pinn/`** Taylor fusion trainer is a *different* (non-gated) lineage: it resolves
+its base experiments from `vision-sensor/train_vision_sensor.py` (the non-gated grid:
+`vision_only_647`, early/intermediate/late × raw25/top25/all40) and defaults to
+`--base-exp intermediate_top25`. `pinn/run_taylor_fusion.sh` references the gated base
+name in its `--base-exp` for historical reasons; to actually run the gated config use
+`pinn_aircuts/`. Run the gated model with air cuts directly via:
 ```bash
 python train_vision_sensorV2.py --data-dir data/matwi --labels-csv data/matwi/labels.csv \
     --sets-csv data/matwi/sets.csv --output-dir runs/task3 --only t3_gated_top25_md30_gated
@@ -331,34 +363,52 @@ understand the modality before fusing. Full write-up in
 **Pipeline (`sensor_only_v2.py`):** richer dimensionless features (relative spectral 
 bands, robust spread, within-pass windowed-RMS trend, force resultant); per-set "delta" 
 features (subtract each set's unworn-baseline signature); cutting-parameter features; 
-**air-cut filtering** (v3) and **per-cutting-pass** features (v4); both Ridge and LightGBM; 
-evaluated on the official split **and** leave-one-set-out (LOSO) CV.
+**air-cut removal** via the **wavelet edge-detector** adopted from the previous group's
+`RemoveAircuts/` notebook (db4 level-4 DWT on vibration + acoustic → single cutting window;
+see [BUGFIXES.md](BUGFIXES.md) §10); both Ridge and LightGBM; evaluated on the official
+split **and** leave-one-set-out (LOSO) CV. To compare with vs without air cuts, run the
+script once and read the `*_v2_*` (no air cut) vs `*_v3_*`/`*_v4_*` (wavelet air cut) rows
+in `results.csv`. Note: the wavelet detector yields a single window, so **`v4` ≡ `v3`** (v4
+is kept only for column compatibility). The detector keeps ~75 % of each recording
+(p10–p90: 70–78 %), i.e. it removes ~25 % air cut consistently per recording.
 
-**Results (test MAE, µm):**
+**Results (test MAE, µm; wavelet air-cut detector, official 1–13 split):**
 
-| Method                | Overall | Flank | Adh  | F+A  | Note                              |
-|-----------------------|---------|-------|------|------|-----------------------------------|
-| predict-mean          | 40.9    | 41.0  | 58.8 | 34.6 | trivial floor                     |
-| Ridge on 40 features  | 56.0    | 45.6  | 52.8 | 101  | original baseline (worse than mean)|
-| **LGBM v2 + delta**   | **21.8**| 18.7  | 52.8 | 24.8 | best overall                      |
-| LGBM v3 + delta (in-cut) | 23.2 | **16.6** | **45.3** | 43.9 | **best flank — matches vision** |
+| Method                    | Overall | Flank | Adh  | F+A  | LOSO | Note                              |
+|---------------------------|---------|-------|------|------|------|-----------------------------------|
+| predict-mean              | 40.9    | 41.0  | 58.8 | 34.6 | —    | trivial floor                     |
+| best Ridge (`ridge_v1_delta`) | 41.9 | 29.9 | 40.0 | 94.0 | 92.2 | Ridge barely beats the floor      |
+| LGBM v2 + delta (no air cut) | 21.8 | **18.7** | 52.8 | 24.8 | 63.4 | strong, but air cut beats it      |
+| **LGBM v3 + delta (wavelet air cut)** | **21.1** | 19.5 | **44.2** | **20.1** | 64.7 | **best overall + best F+A**       |
+| LGBM v2 + delta + cutting (`v2cut`) | 31.3 | 29.8 | 44.3 | 33.5 | **54.9** | best honest (LOSO) generaliser |
 
 **Key findings:**
 1. **A LightGBM early-stopping bug** (stopping on the out-of-distribution val set) was 
    underfitting every model to 2–7 boosting rounds. Fixing it (early-stop on an 
-   in-distribution train slice) dropped best test MAE from 29.9 → **21.8 µm**, approaching 
+   in-distribution train slice) dropped best test MAE from 29.9 → ~21.8 µm, approaching 
    vision-only (19.0).
-2. **Air-cut removal helps the clean wear types.** It gives the best flank-wear MAE of the 
-   whole project (**16.6 µm, matching the vision model**) and best adhesion, but regresses 
-   on flank+adhesion. Since flank dominates the data, it wins on flank-weighted views.
-3. **Air-cut removal is near-invisible to tree models** on whole-signal stats (median 
-   rank-correlation 0.98 between gated/ungated features — trees split on rank order, and 
-   gating mostly rescales) but **clearly helps the scale-sensitive Ridge** (val MAE 
-   84.2 → 63.7). The benefit is model-class dependent.
-4. **LightGBM >> Ridge everywhere** (best Ridge 34.8 vs best LGBM 21.8); the original 
-   absolute band-energy features were a set-identity leak — now fixed to relative energy.
-5. **Ceiling from two anomalous sets (5, 11):** LOSO pooled stays ~55 µm because those 
-   two setups break every model regardless of features or air-cut filtering.
+2. **Air-cut removal (wavelet method) is the best sensor-only result.** `lgbm_v3_delta`
+   reaches **21.1 µm overall**, beating the no-air-cut `lgbm_v2_delta` (21.8). The decisive
+   gain is on **flank+adhesion — 20.1 µm**, the best F+A anywhere in the study (vs 24.8
+   ungated), with adhesion also improving (52.8 → 44.2) for a tiny flank cost (18.7 → 19.5).
+   F+A is the project's hardest case, so this is the meaningful win.
+3. **Detector choice flips the conclusion.** With our earlier envelope detector air cuts
+   *lost* (v3_delta 24.1 overall, F+A 38.7); with the wavelet detector they *win*. The
+   reproducible single-window crop — keeping a consistent ~75 % per recording — is what
+   makes the difference (full ours-vs-theirs comparison in [BUGFIXES.md](BUGFIXES.md) §10).
+4. **LightGBM ≫ Ridge.** Best LGBM 21.1 vs best Ridge 41.9 (barely beating predict-mean).
+   Ridge actually *breaks* under the wavelet crop (`ridge_v3_delta` 89.8 µm, F+A 199.8)
+   because the crop rescales features and Ridge is scale-sensitive — irrelevant to the
+   conclusion, but a reminder the benefit is model-class dependent.
+5. **Honest generalisation (LOSO) does not improve with air cuts.** The best cross-set
+   numbers are the *no-air-cut absolute* methods (`lgbm_v1v2cut_absolute` 54.9,
+   `lgbm_v2_absolute` 55.3); the air-cut delta variants sit at ~64–65 µm LOSO. So the
+   official-split **21.1 is optimistic** — read **LOSO ~55 µm** as the honest cross-setup
+   ceiling, set by the anomalous setups (sets 5, 11) that air-cut filtering cannot fix.
+
+> **Reporting guidance:** headline = `lgbm_v3_delta` **21.1 µm overall / 20.1 µm F+A**
+> (wavelet air-cut removal, official split); honest generalisation floor ≈ **55 µm** (LOSO).
+> Rerun `sensor_only_v2.py --force-extract` after any detector change (cached `.npz`).
 
 ---
 

@@ -55,6 +55,7 @@ import numpy as np
 import pandas as pd
 from PIL import Image
 from scipy import stats as scipy_stats
+import pywt
 
 import torch
 from torch.utils.data import Dataset, WeightedRandomSampler
@@ -119,15 +120,17 @@ SENSOR_FS = 1000.0 / 0.6  # ≈ 1666.67 Hz
 # Total number of sensor features extracted per sample
 N_SENSOR_FEATURES = len(SENSOR_CHANNELS) * 8  # 5 channels × 8 features = 40
 
-# ── Air-cut gating parameters (mirrors sensor-only/sensor_only_v2.py) ─────────
-# Each ~50-60 s recording starts with the tool approaching the workpiece (no
-# contact) and ends with it retracting. Only the middle is active cutting.
-# Gating removes the silent approach/retraction phases before feature
-# extraction. Detection uses a rolling-std envelope on the acoustic AND
-# accelerometer channels, thresholded at a fraction of each channel's max.
-AIRCUT_THR_FRAC    = 0.30   # fraction of envelope max
-AIRCUT_WIN         = 100    # rolling-window samples (~60 ms at 1666 Hz)
-AIRCUT_MIN_SAMPLES = 500    # below this, fall back to the full signal
+# ── Air-cut removal parameters (wavelet edge detector) ────────────────────────
+# Ported from the previous group's RemoveAircuts/Removing_Aircuts.ipynb. Each
+# recording is ONE cut (tool approach in air -> cutting -> retract in air); the
+# detector finds a single [start, end) cutting window via a db4 level-4 Discrete
+# Wavelet Transform of the vibration (acc) and acoustic channels and crops to it.
+WAVELET_NAME       = "db4"
+WAVELET_LEVEL      = 4
+WAVELET_Z_THRESH   = 10.0     # detail-energy z-score for "active" (their FIXED_SENSITIVITY)
+WAVELET_BASELINE_N = 1000     # first N detail coeffs assumed to be air (approach)
+WAVELET_MIN_ACTIVE = 1000     # < this many active samples -> keep the full signal
+WAVELET_TRIM       = -0.05    # negative => expand window outward 5% each side (their FIXED_TRIM)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -178,106 +181,68 @@ FEATURE_SETS = {
 # Sensor feature engineering
 # ══════════════════════════════════════════════════════════════════════════════
 
-def in_cut_mask(
-    df:          pd.DataFrame,
-    thr_frac:    float = AIRCUT_THR_FRAC,
-    win:         int   = AIRCUT_WIN,
-    min_samples: int   = AIRCUT_MIN_SAMPLES,
-) -> np.ndarray:
+def _wavelet_edges(sig: np.ndarray, z_thresh: float = WAVELET_Z_THRESH) -> tuple[int, int]:
     """
-    Boolean mask (len(df),) marking samples where the tool is engaged (cutting).
+    Single-channel cutting window [start, end] via db4 level-4 detail-energy
+    z-scores (their get_wavelet_indices). The detail-coefficient energy captures
+    high-frequency engagement transients; the baseline mean/std come from the
+    first WAVELET_BASELINE_N detail coeffs (the recording starts in air). The
+    window is then expanded outward by |WAVELET_TRIM| so cut edges aren't clipped.
+    Falls back to (0, len) when fewer than WAVELET_MIN_ACTIVE samples are active.
+    """
+    sig = np.array(sig, dtype=np.float64)   # copy: pywt needs a writable buffer
+    n = len(sig)
+    if n < 2:
+        return 0, n
+    coeffs = pywt.wavedec(sig, WAVELET_NAME, level=WAVELET_LEVEL)
+    detail_energy = np.abs(coeffs[-1])
+    if detail_energy.size == 0:
+        return 0, n
+    base = detail_energy[:WAVELET_BASELINE_N]
+    mu  = float(np.mean(base))
+    std = float(np.std(base)) + 1e-9
+    z = (detail_energy - mu) / std
+    upscale = n // len(z) if len(z) else 1
+    z_full = np.repeat(z, upscale + 1)[:n]
+    active = np.where(z_full > z_thresh)[0]
+    if len(active) < WAVELET_MIN_ACTIVE:
+        return 0, n
+    g_start, g_end = int(active[0]), int(active[-1])
+    duration = g_end - g_start
+    s = int(np.clip(g_start + duration * WAVELET_TRIM, 0, n - 1))
+    e = int(np.clip(g_end   - duration * WAVELET_TRIM, 0, n - 1))
+    return s, e
 
-    Uses a rolling std envelope on the acoustic and accelerometer channels,
-    thresholded at `thr_frac * envelope_max` per channel, combined with a
-    logical AND. Falls back to all-True if either channel is silent or fewer
-    than `min_samples` survive (avoids catastrophic feature loss / FFT on a
-    near-empty window). Mirrors sensor-only/sensor_only_v2.py.
+
+def wavelet_cut_window(df: pd.DataFrame) -> tuple[int, int]:
+    """
+    Cutting window [start, end) = intersection of the vibration (acc) and
+    acoustic wavelet edges (their dual-detection: max of starts, min of ends).
+    Falls back to the full signal when detection fails.
     """
     n = len(df)
     if n == 0:
-        return np.zeros(0, dtype=bool)
-
-    aco = df["acoustic"].astype(np.float64).to_numpy()
-    acc = df["acc"].astype(np.float64).to_numpy()
-
-    aco_env = pd.Series(aco).rolling(win, min_periods=1).std().to_numpy()
-    acc_env = pd.Series(acc).rolling(win, min_periods=1).std().to_numpy()
-    aco_env = np.nan_to_num(aco_env, nan=0.0)
-    acc_env = np.nan_to_num(acc_env, nan=0.0)
-
-    aco_max = float(aco_env.max()) if aco_env.size else 0.0
-    acc_max = float(acc_env.max()) if acc_env.size else 0.0
-
-    in_aco = (aco_env > thr_frac * aco_max) if aco_max > 1e-9 else np.ones(n, dtype=bool)
-    in_acc = (acc_env > thr_frac * acc_max) if acc_max > 1e-9 else np.ones(n, dtype=bool)
-    mask = in_aco & in_acc
-
-    if mask.sum() < min_samples:
-        return np.ones(n, dtype=bool)
-    return mask
+        return 0, 0
+    v_s, v_e = _wavelet_edges(df["acc"].astype(np.float64).to_numpy())
+    a_s, a_e = _wavelet_edges(df["acoustic"].astype(np.float64).to_numpy())
+    s, e = max(v_s, a_s), min(v_e, a_e)
+    if e <= s:
+        return 0, n
+    return s, e
 
 
-def extract_sensor_features(sensor_path: Path,
-                            gate_aircuts: bool = False) -> np.ndarray:
-    """
-    Load one sensor CSV file and extract a fixed-length feature vector.
+def find_cut_segments(df: pd.DataFrame) -> list[tuple[int, int]]:
+    """Compatibility helper. The wavelet detector yields a single contiguous
+    cutting window, so this returns a one-element list [(start, end)]."""
+    return [wavelet_cut_window(df)]
 
-    Sensor CSV format (no header):
-        col 0: accelerometer
-        col 1: acoustic emission
-        col 2: Force X
-        col 3: Force Y
-        col 4: Force Z
-        col 5: datetime (ignored here)
 
-    Features extracted per channel (8 per channel × 5 channels = 40 total):
-        Time domain (5):
-            mean, std, rms, peak-to-peak (p2p), kurtosis
-        Frequency domain (3):
-            dominant frequency (Hz), low-band energy fraction (0–200 Hz),
-            mid-band energy fraction (200–800 Hz)
-
-    Frequency note: low/mid band energy are RELATIVE (band power / total power),
-    not absolute sums. Absolute energy scales with the signal length, which is
-    already variable across raw recordings (78k–99k samples) and becomes more
-    variable under air-cut gating — corrupting any length-dependent feature.
-    Relative band energy is length- and gain-invariant, so the same feature is
-    valid whether or not gating is applied. (FFT frequencies themselves are
-    NOT distorted by length: rfftfreq(n) recomputes the correct Hz axis, so a
-    200 Hz component stays at 200 Hz regardless of n.)
-
-    Parameters
-    ----------
-    gate_aircuts : bool
-        If True, remove the tool-approach / tool-retraction (air-cut) phases
-        via in_cut_mask before computing features. The 40-feature layout is
-        unchanged, so downstream FEATURE_SETS and the model are unaffected.
-
-    Returns
-    -------
-    np.ndarray of shape (40,), dtype float32.
-    Returns zeros if the file cannot be loaded (with a warning).
-    """
-    try:
-        df = pd.read_csv(
-            sensor_path,
-            header=None,
-            usecols=[0, 1, 2, 3, 4],
-            dtype=np.float32,
-            low_memory=False,
-        )
-        df.columns = SENSOR_CHANNELS
-    except Exception as e:
-        warnings.warn(f"Could not load sensor file {sensor_path}: {e}")
-        return np.zeros(N_SENSOR_FEATURES, dtype=np.float32)
-
-    # ── Air-cut gating (optional) ──
-    if gate_aircuts:
-        mask = in_cut_mask(df)
-        df = df.iloc[mask].reset_index(drop=True)
-
+def _extract_features_from_df(df: pd.DataFrame) -> np.ndarray:
+    """Extract the fixed 40-feature vector from an already-selected signal."""
     features = []
     n = len(df)
+    if n == 0:
+        return np.zeros(N_SENSOR_FEATURES, dtype=np.float32)
 
     # Pre-compute FFT frequency bins (shared across channels). Recomputed from
     # the (possibly gated) length n so the Hz axis is always correct.
@@ -323,6 +288,70 @@ def extract_sensor_features(sensor_path: Path,
                          dom_freq, low_energy, mid_energy])
 
     return np.array(features, dtype=np.float32)
+
+
+def extract_sensor_features(sensor_path: Path,
+                            gate_aircuts: bool = False) -> np.ndarray:
+    """
+    Load one sensor CSV file and extract a fixed-length feature vector.
+
+    Sensor CSV format (no header):
+        col 0: accelerometer
+        col 1: acoustic emission
+        col 2: Force X
+        col 3: Force Y
+        col 4: Force Z
+        col 5: datetime (ignored here)
+
+    Features extracted per channel (8 per channel × 5 channels = 40 total):
+        Time domain (5):
+            mean, std, rms, peak-to-peak (p2p), kurtosis
+        Frequency domain (3):
+            dominant frequency (Hz), low-band energy fraction (0–200 Hz),
+            mid-band energy fraction (200–800 Hz)
+
+    Frequency note: low/mid band energy are RELATIVE (band power / total power),
+    not absolute sums. Absolute energy scales with the signal length, which is
+    already variable across raw recordings (78k–99k samples) and becomes more
+    variable under air-cut gating — corrupting any length-dependent feature.
+    Relative band energy is length- and gain-invariant, so the same feature is
+    valid whether or not gating is applied. (FFT frequencies themselves are
+    NOT distorted by length: rfftfreq(n) recomputes the correct Hz axis, so a
+    200 Hz component stays at 200 Hz regardless of n.)
+
+    Parameters
+    ----------
+    gate_aircuts : bool
+        If True, remove the tool-approach / tool-retraction (air-cut) phases
+        via the wavelet-detected cutting window (`wavelet_cut_window`). The
+        40-feature layout is unchanged, so downstream FEATURE_SETS and the
+        model are unaffected.
+
+    Returns
+    -------
+    np.ndarray of shape (40,), dtype float32.
+    Returns zeros if the file cannot be loaded (with a warning).
+    """
+    try:
+        df = pd.read_csv(
+            sensor_path,
+            header=None,
+            usecols=[0, 1, 2, 3, 4],
+            dtype=np.float32,
+            low_memory=False,
+        )
+        df.columns = SENSOR_CHANNELS
+    except Exception as e:
+        warnings.warn(f"Could not load sensor file {sensor_path}: {e}")
+        return np.zeros(N_SENSOR_FEATURES, dtype=np.float32)
+
+    if gate_aircuts:
+        start, end = wavelet_cut_window(df)
+        df_cut = df.iloc[start:end].reset_index(drop=True)
+        if len(df_cut) >= 4:
+            return _extract_features_from_df(df_cut)
+
+    return _extract_features_from_df(df)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

@@ -220,13 +220,26 @@ DEFAULT_EXPERIMENTS = [
 
 # ── Utilities ─────────────────────────────────────────────────────────────────
 
-def set_seed(seed: int) -> None:
+def set_seed(seed: int, deterministic: bool = True) -> None:
+    """
+    Seed all RNGs. With deterministic=True (default) cuDNN runs in
+    reproducible mode so small MAE differences between fusion configs reflect
+    the design change, not run-to-run RNG noise. Pass deterministic=False to
+    trade reproducibility for cuDNN autotuning speed.
+    """
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = False
-    torch.backends.cudnn.benchmark     = True
+    torch.backends.cudnn.deterministic = deterministic
+    torch.backends.cudnn.benchmark     = not deterministic
+
+
+def seed_worker(worker_id: int) -> None:
+    """Seed numpy/random per DataLoader worker from torch's base seed."""
+    worker_seed = torch.initial_seed() % 2**32
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
 
 
 def predictions_to_um(pred: torch.Tensor) -> torch.Tensor:
@@ -306,14 +319,25 @@ def build_loaders(
     print(f"\n  Fitting sensor scaler on {len(train_ds)} training samples...")
     scaler = train_ds.fit_sensor_scaler()
 
+    # Reproducible shuffle order tied to the global seed set before this call.
+    g = torch.Generator()
+    g.manual_seed(torch.initial_seed() % 2**32)
+    # persistent_workers keeps the per-worker sensor-feature cache alive across
+    # epochs; without it, workers are re-spawned every epoch and the ~99k-row
+    # sensor CSVs are re-parsed from disk each time.
+    persistent = num_workers > 0
+
     loaders = {
         "train": DataLoader(
             train_ds,
-            batch_size  = cfg.batch_size,
-            shuffle     = True,
-            num_workers = num_workers,
-            pin_memory  = True,
-            drop_last   = True,
+            batch_size        = cfg.batch_size,
+            shuffle           = True,
+            num_workers       = num_workers,
+            pin_memory        = True,
+            drop_last         = True,
+            worker_init_fn    = seed_worker,
+            generator         = g,
+            persistent_workers = persistent,
         ),
     }
 
@@ -330,11 +354,13 @@ def build_loaders(
             continue
         loaders[split] = DataLoader(
             ds,
-            batch_size  = cfg.batch_size,
-            shuffle     = False,
-            num_workers = num_workers,
-            pin_memory  = True,
-            drop_last   = False,
+            batch_size        = cfg.batch_size,
+            shuffle           = False,
+            num_workers       = num_workers,
+            pin_memory        = True,
+            drop_last         = False,
+            worker_init_fn    = seed_worker,
+            persistent_workers = persistent,
         )
 
     sizes = "  |  ".join(f"{k}: {len(v.dataset)}" for k, v in loaders.items())

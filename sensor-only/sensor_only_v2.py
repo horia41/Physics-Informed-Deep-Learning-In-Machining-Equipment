@@ -72,8 +72,19 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+# Force UTF-8 stdout/stderr so the box-drawing (─) and µ characters in the
+# progress/summary output don't crash on Windows when piped or redirected
+# (cp1252 default raises UnicodeEncodeError under `... | tail`, `> log.txt`,
+# or SLURM log files). No-op on POSIX / already-UTF-8 streams.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8")
+    except (AttributeError, ValueError):
+        pass
+
 import numpy as np
 import pandas as pd
+import pywt
 from scipy import stats as scipy_stats
 from sklearn.linear_model import Ridge
 from sklearn.preprocessing import StandardScaler
@@ -365,65 +376,68 @@ def get_v2_feature_dim() -> int:
 # first and last segments are pure silence). Filtering to in-cut samples
 # before extraction sharpens every feature the LGBM model relies on.
 #
-# Detection: rolling std of acoustic AND accelerometer envelopes; threshold
-# at a fraction of each channel's max. Combined AND-style for robustness:
-# both channels must register cutting activity. Safety net falls back to
-# the full signal if too few samples survive.
+# Detection: db4 level-4 Discrete Wavelet Transform on the vibration (acc) and
+# acoustic channels (ported from the previous group's RemoveAircuts notebook).
+# The detail-coefficient energy captures the high-frequency transients of tool
+# engagement; it is z-scored against a baseline from the first WAVELET_BASELINE_N
+# detail coeffs (the recording starts in air). The cutting window runs from the
+# first to the last "active" sample (z > threshold), intersected across the two
+# channels and expanded 5% outward.
 
-DEFAULT_IN_CUT_THR  = 0.30   # fraction of envelope max
-DEFAULT_IN_CUT_WIN  = 100    # rolling-window samples (~60 ms at 1666 Hz)
-MIN_IN_CUT_SAMPLES  = 500    # below this, fall back to full signal
+WAVELET_NAME       = "db4"
+WAVELET_LEVEL      = 4
+WAVELET_Z_THRESH   = 10.0     # detail-energy z-score for "active" (their FIXED_SENSITIVITY)
+WAVELET_BASELINE_N = 1000     # first N detail coeffs assumed to be air (approach)
+WAVELET_MIN_ACTIVE = 1000     # < this many active samples -> keep the full signal
+WAVELET_TRIM       = -0.05    # negative => expand window outward 5% each side (their FIXED_TRIM)
 
 
-def in_cut_mask(
-    df:         pd.DataFrame,
-    thr_frac:   float = DEFAULT_IN_CUT_THR,
-    win:        int   = DEFAULT_IN_CUT_WIN,
-    min_samples: int  = MIN_IN_CUT_SAMPLES,
-) -> np.ndarray:
-    """
-    Boolean mask (len(df),) marking samples where the tool is engaged.
+def _wavelet_edges(sig: np.ndarray, z_thresh: float = WAVELET_Z_THRESH) -> tuple[int, int]:
+    """Single-channel cutting window via db4-L4 detail-energy z-scores
+    (their get_wavelet_indices). Falls back to (0, len) on weak detection."""
+    sig = np.array(sig, dtype=np.float64)   # copy: pywt needs a writable buffer
+    n = len(sig)
+    if n < 2:
+        return 0, n
+    coeffs = pywt.wavedec(sig, WAVELET_NAME, level=WAVELET_LEVEL)
+    detail_energy = np.abs(coeffs[-1])
+    if detail_energy.size == 0:
+        return 0, n
+    base = detail_energy[:WAVELET_BASELINE_N]
+    mu  = float(np.mean(base))
+    std = float(np.std(base)) + 1e-9
+    z = (detail_energy - mu) / std
+    upscale = n // len(z) if len(z) else 1
+    z_full = np.repeat(z, upscale + 1)[:n]
+    active = np.where(z_full > z_thresh)[0]
+    if len(active) < WAVELET_MIN_ACTIVE:
+        return 0, n
+    g_start, g_end = int(active[0]), int(active[-1])
+    duration = g_end - g_start
+    s = int(np.clip(g_start + duration * WAVELET_TRIM, 0, n - 1))
+    e = int(np.clip(g_end   - duration * WAVELET_TRIM, 0, n - 1))
+    return s, e
 
-    Uses rolling std on both acoustic and accelerometer channels, threshold
-    at `thr_frac · envelope_max` per channel, then AND. Falls back to all-True
-    if (a) either channel is silent, or (b) fewer than `min_samples` survive
-    (avoids catastrophic feature loss on degenerate recordings).
-    """
+
+def wavelet_cut_window(df: pd.DataFrame) -> tuple[int, int]:
+    """Cutting window [start, end) = intersection of vibration (acc) and
+    acoustic wavelet edges. Falls back to the full signal on weak detection."""
     n = len(df)
     if n == 0:
-        return np.zeros(0, dtype=bool)
-
-    aco = df["acoustic"].astype(np.float64).to_numpy()
-    acc = df["acc"].astype(np.float64).to_numpy()
-
-    aco_env = pd.Series(aco).rolling(win, min_periods=1).std().to_numpy()
-    acc_env = pd.Series(acc).rolling(win, min_periods=1).std().to_numpy()
-    # Rolling std with min_periods=1 → first value is NaN (single-sample std);
-    # treat NaN as 0 (definitely not in cut at the boundary).
-    aco_env = np.nan_to_num(aco_env, nan=0.0)
-    acc_env = np.nan_to_num(acc_env, nan=0.0)
-
-    aco_max = float(aco_env.max()) if aco_env.size else 0.0
-    acc_max = float(acc_env.max()) if acc_env.size else 0.0
-
-    in_aco = (aco_env > thr_frac * aco_max) if aco_max > 1e-9 else np.ones(n, dtype=bool)
-    in_acc = (acc_env > thr_frac * acc_max) if acc_max > 1e-9 else np.ones(n, dtype=bool)
-    mask = in_aco & in_acc
-
-    if mask.sum() < min_samples:
-        # Safety: not enough survived — likely a recording where the
-        # envelope is too flat to discriminate. Use everything.
-        return np.ones(n, dtype=bool)
-    return mask
+        return 0, 0
+    v_s, v_e = _wavelet_edges(df["acc"].astype(np.float64).to_numpy())
+    a_s, a_e = _wavelet_edges(df["acoustic"].astype(np.float64).to_numpy())
+    s, e = max(v_s, a_s), min(v_e, a_e)
+    if e <= s:
+        return 0, n
+    return s, e
 
 
 def extract_features_v3(sensor_path: Path) -> tuple[np.ndarray, float]:
     """
-    Same 85 features as v2, but computed over IN-CUT samples only.
-
-    Returns (features, in_cut_fraction) where in_cut_fraction ∈ [0, 1]
-    is the fraction of the original recording kept after filtering.
-    Returns zeros on load failure.
+    Same 85 features as v2, but computed over the wavelet-detected cutting
+    window only (air cuts removed). Returns (features, keep_fraction) where
+    keep_fraction is the fraction of the recording retained. Zeros on failure.
     """
     dim = get_v2_feature_dim()
     try:
@@ -436,9 +450,12 @@ def extract_features_v3(sensor_path: Path) -> tuple[np.ndarray, float]:
         warnings.warn(f"Could not load sensor file {sensor_path}: {e}")
         return np.zeros(dim, dtype=np.float32), 0.0
 
-    mask = in_cut_mask(df)
-    keep_frac = float(mask.mean())
-    df_cut = df.iloc[mask].reset_index(drop=True)
+    n = len(df)
+    s, e = wavelet_cut_window(df)
+    df_cut = df.iloc[s:e].reset_index(drop=True)
+    if len(df_cut) < 4:
+        df_cut, s, e = df, 0, n
+    keep_frac = float((e - s) / n) if n else 0.0
 
     feats: list[float] = []
     for ch in SENSOR_CHANNELS:
@@ -466,101 +483,24 @@ def extract_features_v3(sensor_path: Path) -> tuple[np.ndarray, float]:
 # Tier 5 — Per-cutting-pass features (v4)
 # ═════════════════════════════════════════════════════════════════════════════
 #
-# v3 concatenates all in-cut samples into one signal, which creates artificial
-# discontinuities at the boundaries between cutting passes. Those jumps corrupt
-# the FFT (spectral leakage) and the windowed-RMS trend (the trend fit jumps
-# across pass boundaries). v4 instead detects each contiguous cutting SEGMENT,
-# extracts the full 85-feature vector PER segment, and length-weighted-averages
-# the feature vectors across segments. This:
-#   • removes air cuts (like v3), AND
-#   • computes spectral / windowed-trend features on clean single-pass signals,
-#     which changes the rank order of those features (so a tree model can
-#     actually benefit, unlike the monotonic rescaling v3 produced).
-# Same 85-dim layout as v2/v3, so it is drop-in for the delta + method machinery.
-
-MIN_SEGMENT_SAMPLES = 1000   # ignore segments shorter than ~0.6 s
+# Under the single-window wavelet detector (their method) there is exactly ONE
+# contiguous cutting window per recording, so the old per-segment averaging
+# degenerates to "features on that one window" — i.e. v4 is identical to v3. v4
+# is kept as an alias below so the existing method matrix / result columns and
+# downstream scripts keep working unchanged.
 
 
-def find_cut_segments(
-    df:          pd.DataFrame,
-    thr_frac:    float = DEFAULT_IN_CUT_THR,
-    win:         int   = DEFAULT_IN_CUT_WIN,
-    min_seg:     int   = MIN_SEGMENT_SAMPLES,
-) -> list[tuple[int, int]]:
-    """
-    Return a list of (start, end) index pairs for contiguous in-cut segments
-    (each at least `min_seg` samples long). Uses the same envelope detector as
-    in_cut_mask. Falls back to a single full-signal segment if none qualify.
-    """
-    mask = in_cut_mask(df, thr_frac=thr_frac, win=win, min_samples=1)
-    n = len(mask)
-    segments: list[tuple[int, int]] = []
-    i = 0
-    while i < n:
-        if mask[i]:
-            j = i
-            while j < n and mask[j]:
-                j += 1
-            if (j - i) >= min_seg:
-                segments.append((i, j))
-            i = j
-        else:
-            i += 1
-    if not segments:
-        segments = [(0, n)]   # safety: never return empty
-    return segments
+def find_cut_segments(df: pd.DataFrame) -> list[tuple[int, int]]:
+    """Compatibility helper: the wavelet detector yields a single cutting
+    window, so this returns a one-element list [(start, end)]."""
+    return [wavelet_cut_window(df)]
 
 
 def extract_features_v4(sensor_path: Path) -> tuple[np.ndarray, int]:
-    """
-    Per-cutting-pass features: extract the 85-dim v2 feature vector on EACH
-    contiguous cutting segment, then length-weighted-average across segments.
-
-    Returns (features, n_segments). Returns zeros on load failure.
-    """
-    dim = get_v2_feature_dim()
-    try:
-        df = pd.read_csv(
-            sensor_path, header=None, usecols=[0, 1, 2, 3, 4],
-            dtype=np.float32, low_memory=False,
-        )
-        df.columns = SENSOR_CHANNELS
-    except Exception as e:
-        warnings.warn(f"Could not load sensor file {sensor_path}: {e}")
-        return np.zeros(dim, dtype=np.float32), 0
-
-    segments = find_cut_segments(df)
-
-    seg_feats:  list[np.ndarray] = []
-    seg_weights: list[float] = []
-    for (a, b) in segments:
-        seg = df.iloc[a:b].reset_index(drop=True)
-        if len(seg) < 4:
-            continue
-        feats: list[float] = []
-        for ch in SENSOR_CHANNELS:
-            sig = seg[ch].values.astype(np.float64)
-            feats.extend(_channel_features(sig, SENSOR_FS))
-        Fx = seg["Fx"].values.astype(np.float64)
-        Fy = seg["Fy"].values.astype(np.float64)
-        Fz = seg["Fz"].values.astype(np.float64)
-        F_res = np.sqrt(Fx ** 2 + Fy ** 2 + Fz ** 2)
-        fres_mr, fres_sr, fres_sl, fres_ic = _windowed_rms_trend(F_res, N_WINDOWS)
-        feats.extend([float(F_res.mean()), float(F_res.std()),
-                      fres_mr, fres_sr, fres_sl, fres_ic])
-        feats.append(float(np.mean(np.abs(Fx) / (np.abs(Fy) + 1e-6))))
-        for F in (Fx, Fy, Fz):
-            feats.append(float(F.std() / (abs(F.mean()) + 1e-6)))
-        seg_feats.append(np.array(feats, dtype=np.float64))
-        seg_weights.append(float(b - a))
-
-    if not seg_feats:
-        return np.zeros(dim, dtype=np.float32), 0
-
-    W = np.array(seg_weights)
-    F = np.vstack(seg_feats)
-    avg = (F * W[:, None]).sum(axis=0) / W.sum()
-    return avg.astype(np.float32), len(seg_feats)
+    """Under the single-window wavelet method, v4 == v3 (one cutting window).
+    Kept as an alias for backward-compatible result columns. Returns (feats, 1)."""
+    feats, _ = extract_features_v3(sensor_path)
+    return feats, 1
 
 
 # ═════════════════════════════════════════════════════════════════════════════

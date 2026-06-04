@@ -42,7 +42,11 @@ from torch.utils.data import Dataset, WeightedRandomSampler
 import torchvision.transforms as T
 import torchvision.transforms.functional as TF
 
-warnings.filterwarnings("ignore")
+# Silence only the noisy third-party deprecation chatter (pandas/torchvision),
+# NOT this module's own UserWarnings (e.g. missing/leaky sensor scaler) which
+# are meant to be seen.
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 # ── Official paper train/val/test split ───────────────────────────────────────
 SPLIT_SETS = {
@@ -243,16 +247,21 @@ class MATWIVisionDataset(Dataset):
             lambda s: "CK45" if s <= 11 else "RVS 304"
         )
 
-        # Restrict to active sets
-        df = df[df["Set"].isin(self.active_sets)].copy()
-
-        # Apply split filter
+        # Apply split filter.
+        # NOTE: for a named split the split's set list fully determines the
+        # sets, so we must NOT pre-restrict to active_sets first — doing so
+        # silently emptied the "unseen" split (sets 14-17) whenever
+        # set_range="1-13", making the held-out RVS 304 generalisation test
+        # impossible. active_sets is only used for split="all".
         if self.split != "all":
             split_sets = SPLIT_SETS.get(self.split, [])
             # For "1-17" range, train split includes sets 14–17 as additional training data
             if self.set_range == "1-17" and self.split == "train":
                 split_sets = SPLIT_SETS["train"] + SPLIT_SETS["unseen"]
             df = df[df["Set"].isin(split_sets)].copy()
+        else:
+            # "all" → every set in the active range
+            df = df[df["Set"].isin(self.active_sets)].copy()
 
         df = df.reset_index(drop=True)
         return df
@@ -399,7 +408,7 @@ def build_vision_dataloaders(
     augment_strategy: Literal["uniform", "oversample_adhesion"] = "uniform",
     wear_cap:         Optional[float] = 450.0,
     impute_zero_wear: bool = False,
-    image_size:       tuple[int, int] = (224, 224),
+    image_size:       tuple[int, int] = (384, 384),   # matches the class default
     batch_size:       int = 32,
     num_workers:      int = 4,
 ) -> dict:
