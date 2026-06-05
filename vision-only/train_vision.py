@@ -5,14 +5,19 @@ Runs a grid of experiments to find which undocumented paper settings
 explain the gap between our ResNet50 replication (42 µm) and their
 reported result (30 µm).
 
-Ablation grid for ResNet50 paper replication (all use simple head, fixed LR):
-  1. resnet50_imagenet_L1   — our previous setup
-  2. resnet50_imagenet_MSE  — alternative loss
-  3. resnet50_dataset_L1    — alternative normalisation
-  4. resnet50_dataset_MSE   — alternative norm + loss
-
-Plus our EfficientNetV2 reference (mlp head, OneCycleLR):
-  5. efficientnetv2_imagenet_L1_mlp
+Ablation grid (9 experiments, reproducing §5.1 of the README):
+  ResNet50, simple head, fixed LR:
+    1. resnet50_imagenet_L1
+    2. resnet50_imagenet_MSE
+    3. resnet50_dataset_L1
+    4. resnet50_dataset_MSE
+  EfficientNetV2-S, simple head, fixed LR (2×2 norm × loss):
+    5. efficientnetv2_dataset_MSE      <-- headline best (19.0 µm)
+    6. efficientnetv2_imagenet_MSE
+    7. efficientnetv2_dataset_L1
+    8. efficientnetv2_imagenet_L1
+  EfficientNetV2-S, MLP head + OneCycleLR (reference):
+    9. efficientnetv2_imagenet_L1_mlp_sched
 
 All experiments use:
   - Sets 1-13, paper split, 664 training images
@@ -166,9 +171,62 @@ DEFAULT_EXPERIMENTS = [
         use_scheduler = False,
     ),
 
-    # ── EfficientNetV2 reference (our best) ──
+    # ── EfficientNetV2-S, simple head, fixed LR (the 2×2 norm×loss grid) ──
+    # These four reproduce §5.1 of the README, incl. the headline best result
+    # efficientnetv2_dataset_MSE (19.0 µm). They were previously missing from
+    # this grid even though the README reports them.
     ExperimentConfig(
-        name          = "efficientnetv2_imagenet_L1_mlp",
+        name          = "efficientnetv2_dataset_MSE",
+        backbone      = "efficientnetv2_s",
+        set_range     = "1-13",
+        image_size    = (384, 384),
+        epochs        = 17,
+        lr            = 3e-4,
+        normalisation = "dataset",
+        loss          = "MSE",
+        head_type     = "simple",
+        use_scheduler = False,
+    ),
+    ExperimentConfig(
+        name          = "efficientnetv2_imagenet_MSE",
+        backbone      = "efficientnetv2_s",
+        set_range     = "1-13",
+        image_size    = (384, 384),
+        epochs        = 17,
+        lr            = 3e-4,
+        normalisation = "imagenet",
+        loss          = "MSE",
+        head_type     = "simple",
+        use_scheduler = False,
+    ),
+    ExperimentConfig(
+        name          = "efficientnetv2_dataset_L1",
+        backbone      = "efficientnetv2_s",
+        set_range     = "1-13",
+        image_size    = (384, 384),
+        epochs        = 17,
+        lr            = 3e-4,
+        normalisation = "dataset",
+        loss          = "L1",
+        head_type     = "simple",
+        use_scheduler = False,
+    ),
+    ExperimentConfig(
+        name          = "efficientnetv2_imagenet_L1",
+        backbone      = "efficientnetv2_s",
+        set_range     = "1-13",
+        image_size    = (384, 384),
+        epochs        = 17,
+        lr            = 3e-4,
+        normalisation = "imagenet",
+        loss          = "L1",
+        head_type     = "simple",
+        use_scheduler = False,
+    ),
+
+    # ── EfficientNetV2 MLP-head + OneCycle reference (rank 5 in §5.1) ──
+    ExperimentConfig(
+        name          = "efficientnetv2_imagenet_L1_mlp_sched",
         backbone      = "efficientnetv2_s",
         set_range     = "1-13",
         image_size    = (384, 384),
@@ -184,13 +242,32 @@ DEFAULT_EXPERIMENTS = [
 
 # ── Utilities ─────────────────────────────────────────────────────────────────
 
-def set_seed(seed: int) -> None:
+def set_seed(seed: int, deterministic: bool = True) -> None:
+    """
+    Seed all RNGs. With deterministic=True (default) cuDNN runs in
+    reproducible mode so that small MAE differences between ablation runs
+    reflect the design change being tested, not run-to-run RNG noise — this
+    matters here because conclusions are drawn from 1-7 µm gaps on a
+    647-sample dataset. Pass deterministic=False to trade reproducibility
+    for the ~5-15% speed-up of cuDNN autotuning.
+    """
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = False
-    torch.backends.cudnn.benchmark     = True
+    torch.backends.cudnn.deterministic = deterministic
+    torch.backends.cudnn.benchmark     = not deterministic
+
+
+def seed_worker(worker_id: int) -> None:
+    """
+    DataLoader worker init: seed numpy/random in each worker from torch's
+    per-worker base seed so augmentation and any worker-side RNG are
+    reproducible across runs (torch seeds its own RNG per worker already).
+    """
+    worker_seed = torch.initial_seed() % 2**32
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
 
 
 def predictions_to_um(pred: torch.Tensor) -> torch.Tensor:
@@ -236,11 +313,12 @@ def make_criterion(loss_name: str) -> nn.Module:
 # ── Data ──────────────────────────────────────────────────────────────────────
 
 def build_loaders(
-    cfg:         ExperimentConfig,
-    data_dir:    Path,
-    labels_csv:  Path,
-    sets_csv:    Path,
-    num_workers: int,
+    cfg:             ExperimentConfig,
+    data_dir:        Path,
+    labels_csv:      Path,
+    sets_csv:        Path,
+    num_workers:     int,
+    require_sensors: bool = False,
 ) -> dict[str, DataLoader]:
     common = dict(
         data_dir         = data_dir,
@@ -251,20 +329,32 @@ def build_loaders(
         wear_cap         = WEAR_CAP,
         impute_zero_wear = False,
         image_size       = cfg.image_size,
+        require_sensors  = require_sensors,
     )
+
+    # Reproducible shuffle order, tied to the global seed set before this call.
+    g = torch.Generator()
+    g.manual_seed(torch.initial_seed() % 2**32)
+    persistent = num_workers > 0
 
     train_ds = MATWIVisionDataset(**common, split="train", augment=cfg.augment)
     loaders = {
         "train": DataLoader(
             train_ds,
-            batch_size  = cfg.batch_size,
-            shuffle     = True,
-            num_workers = num_workers,
-            pin_memory  = True,
-            drop_last   = True,
+            batch_size        = cfg.batch_size,
+            shuffle           = True,
+            num_workers       = num_workers,
+            pin_memory        = True,
+            drop_last         = True,
+            worker_init_fn    = seed_worker,
+            generator         = g,
+            persistent_workers = persistent,
         ),
     }
 
+    # Sets 14-17 (RVS 304) are only available as a held-out generalisation
+    # split when they are NOT in training, i.e. set_range="1-13". For "1-17"
+    # they are folded into train, so there is nothing held out to evaluate.
     eval_splits = ["val", "test"]
     if cfg.set_range == "1-13":
         eval_splits.append("unseen")
@@ -276,11 +366,13 @@ def build_loaders(
             continue
         loaders[split] = DataLoader(
             ds,
-            batch_size  = cfg.batch_size,
-            shuffle     = False,
-            num_workers = num_workers,
-            pin_memory  = True,
-            drop_last   = False,
+            batch_size        = cfg.batch_size,
+            shuffle           = False,
+            num_workers       = num_workers,
+            pin_memory        = True,
+            drop_last         = False,
+            worker_init_fn    = seed_worker,
+            persistent_workers = persistent,
         )
 
     sizes = "  |  ".join(f"{k}: {len(v.dataset)}" for k, v in loaders.items())
@@ -394,11 +486,12 @@ def run_experiment(
 
     # ── Data ──────────────────────────────────────────────────────────────────
     loaders = build_loaders(
-        cfg         = cfg,
-        data_dir    = args.data_dir,
-        labels_csv  = args.labels_csv,
-        sets_csv    = args.sets_csv,
-        num_workers = args.num_workers,
+        cfg             = cfg,
+        data_dir        = args.data_dir,
+        labels_csv      = args.labels_csv,
+        sets_csv        = args.sets_csv,
+        num_workers     = args.num_workers,
+        require_sensors = args.require_sensors,
     )
 
     # ── Model ─────────────────────────────────────────────────────────────────
@@ -587,6 +680,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Run only one experiment by name.")
     p.add_argument("--list-experiments", action="store_true",
                    help="Print available experiment names and exit.")
+    p.add_argument("--require-sensors", action="store_true",
+                   help="Restrict to samples that also have sensor data (the "
+                        "647-sample multimodal subset). Default off = full 664.")
 
     p.add_argument("--num-workers",      type=int,   default=4)
     p.add_argument("--seed",             type=int,   default=42)

@@ -42,7 +42,11 @@ from torch.utils.data import Dataset, WeightedRandomSampler
 import torchvision.transforms as T
 import torchvision.transforms.functional as TF
 
-warnings.filterwarnings("ignore")
+# Silence only the noisy third-party deprecation chatter (pandas/torchvision),
+# NOT this module's own UserWarnings (e.g. missing/leaky sensor scaler) which
+# are meant to be seen.
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 # ── Official paper train/val/test split ───────────────────────────────────────
 SPLIT_SETS = {
@@ -156,6 +160,7 @@ class MATWIVisionDataset(Dataset):
         wear_cap:           Optional[float] = 450.0,
         impute_zero_wear:   bool = False,
         image_size:         tuple[int, int] = (384, 384),
+        require_sensors:    bool = False,
     ):
         super().__init__()
 
@@ -168,6 +173,11 @@ class MATWIVisionDataset(Dataset):
         self.wear_cap         = wear_cap
         self.impute_zero_wear = impute_zero_wear
         self.image_size       = image_size
+        # When True, restrict to samples that ALSO have sensor data (SensorName
+        # & SensorID present) — reproduces the 647-sample multimodal subset used
+        # by the vision+sensor fusion experiments, so a vision-only run on this
+        # population is directly comparable to fusion. False = full 664 set.
+        self.require_sensors  = require_sensors
 
         # Determine which sets are active for this set_range
         if set_range == "1-13":
@@ -187,7 +197,7 @@ class MATWIVisionDataset(Dataset):
 
         print(f"[MATWIVisionDataset] split={split} | set_range={set_range} | "
               f"norm={normalisation} | augment={self.augment} | "
-              f"n_samples={len(self.df)} | "
+              f"n_samples={len(self.df)} | require_sensors={self.require_sensors} | "
               f"wear_cap={wear_cap}µm | impute_zero={impute_zero_wear}")
 
     # ── Data loading ──────────────────────────────────────────────────────────
@@ -225,6 +235,18 @@ class MATWIVisionDataset(Dataset):
         # Require an image
         df = df[df["ImageName"].notna() & df["ImageID"].notna()].copy()
 
+        # Optionally require sensor data too → the 647-sample multimodal subset.
+        # Uses the EXACT filter from DatasetClass_VisionSensors._load_and_filter
+        # so the populations match the fusion experiments sample-for-sample.
+        if self.require_sensors:
+            if {"SensorName", "SensorID"}.issubset(df.columns):
+                df = df[df["SensorName"].notna() & df["SensorID"].notna()].copy()
+            else:
+                raise KeyError(
+                    "require_sensors=True but labels.csv has no SensorName/"
+                    "SensorID columns — cannot build the 647 multimodal subset."
+                )
+
         # Handle missing wear
         if self.impute_zero_wear:
             df["wear"] = df["wear"].fillna(0.0)
@@ -243,16 +265,21 @@ class MATWIVisionDataset(Dataset):
             lambda s: "CK45" if s <= 11 else "RVS 304"
         )
 
-        # Restrict to active sets
-        df = df[df["Set"].isin(self.active_sets)].copy()
-
-        # Apply split filter
+        # Apply split filter.
+        # NOTE: for a named split the split's set list fully determines the
+        # sets, so we must NOT pre-restrict to active_sets first — doing so
+        # silently emptied the "unseen" split (sets 14-17) whenever
+        # set_range="1-13", making the held-out RVS 304 generalisation test
+        # impossible. active_sets is only used for split="all".
         if self.split != "all":
             split_sets = SPLIT_SETS.get(self.split, [])
             # For "1-17" range, train split includes sets 14–17 as additional training data
             if self.set_range == "1-17" and self.split == "train":
                 split_sets = SPLIT_SETS["train"] + SPLIT_SETS["unseen"]
             df = df[df["Set"].isin(split_sets)].copy()
+        else:
+            # "all" → every set in the active range
+            df = df[df["Set"].isin(self.active_sets)].copy()
 
         df = df.reset_index(drop=True)
         return df
@@ -399,7 +426,7 @@ def build_vision_dataloaders(
     augment_strategy: Literal["uniform", "oversample_adhesion"] = "uniform",
     wear_cap:         Optional[float] = 450.0,
     impute_zero_wear: bool = False,
-    image_size:       tuple[int, int] = (224, 224),
+    image_size:       tuple[int, int] = (384, 384),   # matches the class default
     batch_size:       int = 32,
     num_workers:      int = 4,
 ) -> dict:

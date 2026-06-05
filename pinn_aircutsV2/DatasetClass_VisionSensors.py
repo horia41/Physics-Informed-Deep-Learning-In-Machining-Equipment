@@ -61,11 +61,7 @@ import torch
 from torch.utils.data import Dataset, WeightedRandomSampler
 import torchvision.transforms as T
 
-# Silence only the noisy third-party deprecation chatter (pandas/scipy/torch),
-# NOT this module's own UserWarnings (missing/leaky sensor scaler) which the
-# pipeline relies on to flag standardisation mistakes.
-warnings.filterwarnings("ignore", category=FutureWarning)
-warnings.filterwarnings("ignore", category=DeprecationWarning)
+warnings.filterwarnings("ignore")
 
 
 # ── Reuse constants from vision class ─────────────────────────────────────────
@@ -326,10 +322,10 @@ def extract_sensor_features(sensor_path: Path,
     Parameters
     ----------
     gate_aircuts : bool
-        If True, crop the signal to the wavelet-detected cutting window
-        (`wavelet_cut_window`) before extracting features — the tool-approach /
-        tool-retraction (air-cut) phases are removed. The 40-feature layout is
-        unchanged, so downstream FEATURE_SETS and the model are unaffected.
+        If True, remove the tool-approach / tool-retraction (air-cut) phases
+        via the wavelet-detected cutting window (`wavelet_cut_window`). The
+        40-feature layout is unchanged, so downstream FEATURE_SETS and the
+        model are unaffected.
 
     Returns
     -------

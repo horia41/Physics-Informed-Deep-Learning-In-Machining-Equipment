@@ -79,7 +79,7 @@ _DS = _load_module("dataset_module", [
     _HERE / "DatasetClass_VisionSensors.py",
 ])
 _MDL = _load_module("model_module", [
-    _HERE / "modelVisionSensor.py",
+    _HERE / "modelVisionSensorV2.py",
 ])
 
 MATWIMultimodalDataset = _DS.MATWIMultimodalDataset
@@ -99,9 +99,11 @@ WEAR_TYPES = ["flank_wear", "adhesion", "flank_wear+adhesion"]
 @dataclass
 class ExperimentConfig:
     name:               str
-    fusion_mode:        str       # "none", "early", "intermediate", "late"
+    fusion_mode:        str       # "none", "early", "intermediate", "late", "gated"
     feature_set:        str       # "none", "raw25", "top25", "all40"
     use_sensors:        bool
+    # Task-3 knobs (default off → reproduces the original Stage 2 grid)
+    modality_dropout_p: float = 0.0
     # Fixed settings (same for all experiments)
     set_range:          str   = "1-13"
     image_size:         tuple = (384, 384)
@@ -113,7 +115,6 @@ class ExperimentConfig:
     batch_size:         int   = 32
     sensor_encoder_dim: int   = 64
     dropout_backbone:   float = 0.3
-    gate_aircuts:       bool  = False   # remove tool-approach/retraction phases
 
 
 # ── Experiment grid ───────────────────────────────────────────────────────────
@@ -186,60 +187,65 @@ DEFAULT_EXPERIMENTS = [
         feature_set  = "all40",
         use_sensors  = True,
     ),
+]
 
-    # ── Air-cut ablation ───────────────────────────────────────────────────
-    # Gated twins of the strongest fusion configs. Each is identical to its
-    # ungated counterpart above except gate_aircuts=True (sensor features are
-    # computed on the tool-engaged portion only, with length-invariant
-    # relative band energy). Compare *_gated vs the base name to isolate the
-    # air-cut effect. all40 is included because the relative-energy FFT fix
-    # matters most for the frequency features that gating most affects.
+
+# ── Task-3 grid: fusion improvements WITHOUT Taylor ───────────────────────────
+# 2×2 controlled grid (modality dropout × {intermediate, gated}) on the best
+# feature set from Stage 2 (top25). Each cell differs from its neighbours by
+# exactly one variable. Compare against vision_only_647 (22.4 µm reference).
+#
+#   modality_dropout_p │ fusion_mode
+#   ───────────────────┼──────────────
+#         0.0          │ intermediate   (= Stage 2 best, re-run as task-3 anchor)
+#         0.3          │ intermediate
+#         0.0          │ gated
+#         0.3          │ gated
+
+TASK3_EXPERIMENTS = [
     ExperimentConfig(
-        name         = "intermediate_top25_gated",
-        fusion_mode  = "intermediate",
-        feature_set  = "top25",
-        use_sensors  = True,
-        gate_aircuts = True,
+        name               = "t3_intermediate_top25",
+        fusion_mode        = "intermediate",
+        feature_set        = "top25",
+        use_sensors        = True,
+        modality_dropout_p = 0.0,
     ),
     ExperimentConfig(
-        name         = "early_top25_gated",
-        fusion_mode  = "early",
-        feature_set  = "top25",
-        use_sensors  = True,
-        gate_aircuts = True,
+        name               = "t3_intermediate_top25_md30",
+        fusion_mode        = "intermediate",
+        feature_set        = "top25",
+        use_sensors        = True,
+        modality_dropout_p = 0.3,
     ),
     ExperimentConfig(
-        name         = "intermediate_all40_gated",
-        fusion_mode  = "intermediate",
-        feature_set  = "all40",
-        use_sensors  = True,
-        gate_aircuts = True,
+        name               = "t3_gated_top25",
+        fusion_mode        = "gated",
+        feature_set        = "top25",
+        use_sensors        = True,
+        modality_dropout_p = 0.0,
+    ),
+    ExperimentConfig(
+        name               = "t3_gated_top25_md30",
+        fusion_mode        = "gated",
+        feature_set        = "top25",
+        use_sensors        = True,
+        modality_dropout_p = 0.3,
     ),
 ]
+
+# Full registry — Stage 2 ablation + task-3 grid. --only picks any by name.
+ALL_EXPERIMENTS = DEFAULT_EXPERIMENTS + TASK3_EXPERIMENTS
 
 
 # ── Utilities ─────────────────────────────────────────────────────────────────
 
-def set_seed(seed: int, deterministic: bool = True) -> None:
-    """
-    Seed all RNGs. With deterministic=True (default) cuDNN runs in
-    reproducible mode so small MAE differences between fusion configs reflect
-    the design change, not run-to-run RNG noise. Pass deterministic=False to
-    trade reproducibility for cuDNN autotuning speed.
-    """
+def set_seed(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = deterministic
-    torch.backends.cudnn.benchmark     = not deterministic
-
-
-def seed_worker(worker_id: int) -> None:
-    """Seed numpy/random per DataLoader worker from torch's base seed."""
-    worker_seed = torch.initial_seed() % 2**32
-    np.random.seed(worker_seed)
-    random.seed(worker_seed)
+    torch.backends.cudnn.deterministic = False
+    torch.backends.cudnn.benchmark     = True
 
 
 def predictions_to_um(pred: torch.Tensor) -> torch.Tensor:
@@ -306,7 +312,6 @@ def build_loaders(
         impute_zero_wear = False,
         image_size       = cfg.image_size,
         feature_set      = feature_set,
-        gate_aircuts     = cfg.gate_aircuts,
     )
 
     # Build training set and fit scaler
@@ -319,25 +324,14 @@ def build_loaders(
     print(f"\n  Fitting sensor scaler on {len(train_ds)} training samples...")
     scaler = train_ds.fit_sensor_scaler()
 
-    # Reproducible shuffle order tied to the global seed set before this call.
-    g = torch.Generator()
-    g.manual_seed(torch.initial_seed() % 2**32)
-    # persistent_workers keeps the per-worker sensor-feature cache alive across
-    # epochs; without it, workers are re-spawned every epoch and the ~99k-row
-    # sensor CSVs are re-parsed from disk each time.
-    persistent = num_workers > 0
-
     loaders = {
         "train": DataLoader(
             train_ds,
-            batch_size        = cfg.batch_size,
-            shuffle           = True,
-            num_workers       = num_workers,
-            pin_memory        = True,
-            drop_last         = True,
-            worker_init_fn    = seed_worker,
-            generator         = g,
-            persistent_workers = persistent,
+            batch_size  = cfg.batch_size,
+            shuffle     = True,
+            num_workers = num_workers,
+            pin_memory  = True,
+            drop_last   = True,
         ),
     }
 
@@ -354,13 +348,11 @@ def build_loaders(
             continue
         loaders[split] = DataLoader(
             ds,
-            batch_size        = cfg.batch_size,
-            shuffle           = False,
-            num_workers       = num_workers,
-            pin_memory        = True,
-            drop_last         = False,
-            worker_init_fn    = seed_worker,
-            persistent_workers = persistent,
+            batch_size  = cfg.batch_size,
+            shuffle     = False,
+            num_workers = num_workers,
+            pin_memory  = True,
+            drop_last   = False,
         )
 
     sizes = "  |  ".join(f"{k}: {len(v.dataset)}" for k, v in loaders.items())
@@ -506,6 +498,7 @@ def run_experiment(
             fusion_mode        = cfg.fusion_mode,
             n_sensor_features  = n_sensor_features,
             sensor_encoder_dim = cfg.sensor_encoder_dim,
+            modality_dropout_p = cfg.modality_dropout_p,
         )
 
     model = MATWIMultimodalModel(**model_kwargs).to(device)
@@ -624,6 +617,7 @@ def write_comparison(results: list[dict], output_dir: Path) -> None:
                 "fusion_mode":                 cfg["fusion_mode"],
                 "feature_set":                 cfg["feature_set"],
                 "use_sensors":                 cfg["use_sensors"],
+                "modality_dropout_p":          cfg.get("modality_dropout_p", 0.0),
                 "eval_split":                  split,
                 "best_epoch":                  res["best_epoch"],
                 "best_val_mae_um":             res["best_val_mae_um"],
@@ -637,16 +631,24 @@ def write_comparison(results: list[dict], output_dir: Path) -> None:
     # Reference rows
     rows.append({
         "experiment": "vision_only_664 (reference)", "fusion_mode": "none",
-        "feature_set": "none", "use_sensors": False, "eval_split": "test",
-        "best_epoch": 14, "best_val_mae_um": "—",
+        "feature_set": "none", "use_sensors": False, "modality_dropout_p": 0.0,
+        "eval_split": "test", "best_epoch": 14, "best_val_mae_um": "—",
         "mae_overall_um": 19.0, "mae_flank_wear_um": 16.6,
         "mae_adhesion_um": 37.2, "mae_flank_wear+adhesion_um": 23.2,
         "n_total": 254,
     })
     rows.append({
+        "experiment": "vision_only_647 (reference)", "fusion_mode": "none",
+        "feature_set": "none", "use_sensors": False, "modality_dropout_p": 0.0,
+        "eval_split": "test", "best_epoch": 15, "best_val_mae_um": "—",
+        "mae_overall_um": 22.4, "mae_flank_wear_um": 20.3,
+        "mae_adhesion_um": 35.1, "mae_flank_wear+adhesion_um": 27.1,
+        "n_total": 247,
+    })
+    rows.append({
         "experiment": "paper_baseline", "fusion_mode": "none",
-        "feature_set": "none", "use_sensors": False, "eval_split": "test",
-        "best_epoch": "—", "best_val_mae_um": "—",
+        "feature_set": "none", "use_sensors": False, "modality_dropout_p": 0.0,
+        "eval_split": "test", "best_epoch": "—", "best_val_mae_um": "—",
         "mae_overall_um": 30.0, "mae_flank_wear_um": 14.0,
         "mae_adhesion_um": 39.0, "mae_flank_wear+adhesion_um": 91.0,
         "n_total": 254,
@@ -709,9 +711,10 @@ def main() -> None:
 
     if args.list_experiments:
         print("Available experiments:")
-        for cfg in DEFAULT_EXPERIMENTS:
-            print(f"  {cfg.name:25s}  fusion={cfg.fusion_mode:15s}  "
-                  f"features={cfg.feature_set:6s}  sensors={cfg.use_sensors}")
+        for cfg in ALL_EXPERIMENTS:
+            print(f"  {cfg.name:30s}  fusion={cfg.fusion_mode:15s}  "
+                  f"features={cfg.feature_set:6s}  sensors={cfg.use_sensors}  "
+                  f"mdrop={cfg.modality_dropout_p}")
         sys.exit(0)
 
     output_dir = args.output_dir.resolve()
@@ -721,13 +724,13 @@ def main() -> None:
     device = resolve_device(args.device)
 
     experiments = []
-    for cfg in DEFAULT_EXPERIMENTS:
+    for cfg in ALL_EXPERIMENTS:
         if args.only and cfg.name != args.only:
             continue
         experiments.append(cfg)
 
     if not experiments:
-        available = [c.name for c in DEFAULT_EXPERIMENTS]
+        available = [c.name for c in ALL_EXPERIMENTS]
         print(f"No experiment matched --only='{args.only}'.")
         print(f"Available: {available}")
         sys.exit(1)

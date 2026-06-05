@@ -55,17 +55,12 @@ import numpy as np
 import pandas as pd
 from PIL import Image
 from scipy import stats as scipy_stats
-import pywt
 
 import torch
 from torch.utils.data import Dataset, WeightedRandomSampler
 import torchvision.transforms as T
 
-# Silence only the noisy third-party deprecation chatter (pandas/scipy/torch),
-# NOT this module's own UserWarnings (missing/leaky sensor scaler) which the
-# pipeline relies on to flag standardisation mistakes.
-warnings.filterwarnings("ignore", category=FutureWarning)
-warnings.filterwarnings("ignore", category=DeprecationWarning)
+warnings.filterwarnings("ignore")
 
 
 # ── Reuse constants from vision class ─────────────────────────────────────────
@@ -124,18 +119,6 @@ SENSOR_FS = 1000.0 / 0.6  # ≈ 1666.67 Hz
 # Total number of sensor features extracted per sample
 N_SENSOR_FEATURES = len(SENSOR_CHANNELS) * 8  # 5 channels × 8 features = 40
 
-# ── Air-cut removal parameters (wavelet edge detector) ────────────────────────
-# Ported from the previous group's RemoveAircuts/Removing_Aircuts.ipynb. Each
-# recording is ONE cut (tool approach in air -> cutting -> retract in air); the
-# detector finds a single [start, end) cutting window via a db4 level-4 Discrete
-# Wavelet Transform of the vibration (acc) and acoustic channels and crops to it.
-WAVELET_NAME       = "db4"
-WAVELET_LEVEL      = 4
-WAVELET_Z_THRESH   = 10.0     # detail-energy z-score for "active" (their FIXED_SENSITIVITY)
-WAVELET_BASELINE_N = 1000     # first N detail coeffs assumed to be air (approach)
-WAVELET_MIN_ACTIVE = 1000     # < this many active samples -> keep the full signal
-WAVELET_TRIM       = -0.05    # negative => expand window outward 5% each side (their FIXED_TRIM)
-
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Feature set definitions
@@ -185,117 +168,7 @@ FEATURE_SETS = {
 # Sensor feature engineering
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _wavelet_edges(sig: np.ndarray, z_thresh: float = WAVELET_Z_THRESH) -> tuple[int, int]:
-    """
-    Single-channel cutting window [start, end] via db4 level-4 detail-energy
-    z-scores (their get_wavelet_indices). The detail-coefficient energy captures
-    high-frequency engagement transients; the baseline mean/std come from the
-    first WAVELET_BASELINE_N detail coeffs (the recording starts in air). The
-    window is then expanded outward by |WAVELET_TRIM| so cut edges aren't clipped.
-    Falls back to (0, len) when fewer than WAVELET_MIN_ACTIVE samples are active.
-    """
-    sig = np.array(sig, dtype=np.float64)   # copy: pywt needs a writable buffer
-    n = len(sig)
-    if n < 2:
-        return 0, n
-    coeffs = pywt.wavedec(sig, WAVELET_NAME, level=WAVELET_LEVEL)
-    detail_energy = np.abs(coeffs[-1])
-    if detail_energy.size == 0:
-        return 0, n
-    base = detail_energy[:WAVELET_BASELINE_N]
-    mu  = float(np.mean(base))
-    std = float(np.std(base)) + 1e-9
-    z = (detail_energy - mu) / std
-    upscale = n // len(z) if len(z) else 1
-    z_full = np.repeat(z, upscale + 1)[:n]
-    active = np.where(z_full > z_thresh)[0]
-    if len(active) < WAVELET_MIN_ACTIVE:
-        return 0, n
-    g_start, g_end = int(active[0]), int(active[-1])
-    duration = g_end - g_start
-    s = int(np.clip(g_start + duration * WAVELET_TRIM, 0, n - 1))
-    e = int(np.clip(g_end   - duration * WAVELET_TRIM, 0, n - 1))
-    return s, e
-
-
-def wavelet_cut_window(df: pd.DataFrame) -> tuple[int, int]:
-    """
-    Cutting window [start, end) = intersection of the vibration (acc) and
-    acoustic wavelet edges (their dual-detection: max of starts, min of ends).
-    Falls back to the full signal when detection fails.
-    """
-    n = len(df)
-    if n == 0:
-        return 0, 0
-    v_s, v_e = _wavelet_edges(df["acc"].astype(np.float64).to_numpy())
-    a_s, a_e = _wavelet_edges(df["acoustic"].astype(np.float64).to_numpy())
-    s, e = max(v_s, a_s), min(v_e, a_e)
-    if e <= s:
-        return 0, n
-    return s, e
-
-
-def find_cut_segments(df: pd.DataFrame) -> list[tuple[int, int]]:
-    """Compatibility helper. The wavelet detector yields a single contiguous
-    cutting window, so this returns a one-element list [(start, end)]."""
-    return [wavelet_cut_window(df)]
-
-
-def _extract_features_from_df(df: pd.DataFrame) -> np.ndarray:
-    """Extract the fixed 40-feature vector from an already-selected signal."""
-    features = []
-    n = len(df)
-    if n == 0:
-        return np.zeros(N_SENSOR_FEATURES, dtype=np.float32)
-
-    # Pre-compute FFT frequency bins (shared across channels). Recomputed from
-    # the (possibly gated) length n so the Hz axis is always correct.
-    freqs = np.fft.rfftfreq(n, d=1.0 / SENSOR_FS)
-
-    for ch in SENSOR_CHANNELS:
-        signal = df[ch].values.astype(np.float64)
-
-        # ── Time domain features ──
-        mean_val = float(np.mean(signal))
-        std_val  = float(np.std(signal))
-        rms_val  = float(np.sqrt(np.mean(signal ** 2)))
-        p2p_val  = float(np.max(signal) - np.min(signal))
-        kurt_val = float(scipy_stats.kurtosis(signal, fisher=True))
-        if not np.isfinite(kurt_val):
-            kurt_val = 0.0
-
-        # ── Frequency domain features ──
-        # Remove DC offset before FFT so 0 Hz bin is ~0
-        signal_zero_mean = signal - mean_val
-        fft_mag   = np.abs(np.fft.rfft(signal_zero_mean))
-        fft_power = fft_mag ** 2
-        total_power = float(np.sum(fft_power))
-
-        # Dominant frequency: bin with highest magnitude (excluding DC)
-        fft_mag_no_dc = fft_mag[1:]
-        if len(fft_mag_no_dc) == 0 or np.all(fft_mag_no_dc == 0):
-            dom_freq = 0.0
-        else:
-            dom_freq = float(freqs[np.argmax(fft_mag_no_dc) + 1])
-
-        # Band energy — RELATIVE (fraction of total power), length-invariant.
-        low_mask = freqs <= 200
-        mid_mask = (freqs > 200) & (freqs <= 800)
-        if total_power > 1e-12:
-            low_energy = float(np.sum(fft_power[low_mask]) / total_power)
-            mid_energy = float(np.sum(fft_power[mid_mask]) / total_power)
-        else:
-            low_energy = 0.0
-            mid_energy = 0.0
-
-        features.extend([mean_val, std_val, rms_val, p2p_val, kurt_val,
-                         dom_freq, low_energy, mid_energy])
-
-    return np.array(features, dtype=np.float32)
-
-
-def extract_sensor_features(sensor_path: Path,
-                            gate_aircuts: bool = False) -> np.ndarray:
+def extract_sensor_features(sensor_path: Path) -> np.ndarray:
     """
     Load one sensor CSV file and extract a fixed-length feature vector.
 
@@ -311,25 +184,8 @@ def extract_sensor_features(sensor_path: Path,
         Time domain (5):
             mean, std, rms, peak-to-peak (p2p), kurtosis
         Frequency domain (3):
-            dominant frequency (Hz), low-band energy fraction (0–200 Hz),
-            mid-band energy fraction (200–800 Hz)
-
-    Frequency note: low/mid band energy are RELATIVE (band power / total power),
-    not absolute sums. Absolute energy scales with the signal length, which is
-    already variable across raw recordings (78k–99k samples) and becomes more
-    variable under air-cut gating — corrupting any length-dependent feature.
-    Relative band energy is length- and gain-invariant, so the same feature is
-    valid whether or not gating is applied. (FFT frequencies themselves are
-    NOT distorted by length: rfftfreq(n) recomputes the correct Hz axis, so a
-    200 Hz component stays at 200 Hz regardless of n.)
-
-    Parameters
-    ----------
-    gate_aircuts : bool
-        If True, crop the signal to the wavelet-detected cutting window
-        (`wavelet_cut_window`) before extracting features — the tool-approach /
-        tool-retraction (air-cut) phases are removed. The 40-feature layout is
-        unchanged, so downstream FEATURE_SETS and the model are unaffected.
+            dominant frequency (Hz), low-band energy (0–200 Hz),
+            mid-band energy (200–800 Hz)
 
     Returns
     -------
@@ -349,13 +205,47 @@ def extract_sensor_features(sensor_path: Path,
         warnings.warn(f"Could not load sensor file {sensor_path}: {e}")
         return np.zeros(N_SENSOR_FEATURES, dtype=np.float32)
 
-    if gate_aircuts:
-        start, end = wavelet_cut_window(df)
-        df_cut = df.iloc[start:end].reset_index(drop=True)
-        if len(df_cut) >= 4:
-            return _extract_features_from_df(df_cut)
+    features = []
+    n = len(df)
 
-    return _extract_features_from_df(df)
+    # Pre-compute FFT frequency bins (shared across channels)
+    freqs = np.fft.rfftfreq(n, d=1.0 / SENSOR_FS)
+
+    for ch in SENSOR_CHANNELS:
+        signal = df[ch].values.astype(np.float64)
+
+        # ── Time domain features ──
+        mean_val = float(np.mean(signal))
+        std_val  = float(np.std(signal))
+        rms_val  = float(np.sqrt(np.mean(signal ** 2)))
+        p2p_val  = float(np.max(signal) - np.min(signal))
+        kurt_val = float(scipy_stats.kurtosis(signal, fisher=True))
+        if not np.isfinite(kurt_val):
+            kurt_val = 0.0
+
+        # ── Frequency domain features ──
+        # Remove DC offset before FFT so 0 Hz bin is ~0
+        signal_zero_mean = signal - mean_val
+        fft_mag   = np.abs(np.fft.rfft(signal_zero_mean))
+        fft_power = fft_mag ** 2
+
+        # Dominant frequency: bin with highest magnitude (excluding DC)
+        fft_mag_no_dc = fft_mag[1:]
+        if len(fft_mag_no_dc) == 0 or np.all(fft_mag_no_dc == 0):
+            dom_freq = 0.0
+        else:
+            dom_freq = float(freqs[np.argmax(fft_mag_no_dc) + 1])
+
+        # Band energy
+        low_mask = freqs <= 200
+        mid_mask = (freqs > 200) & (freqs <= 800)
+        low_energy = float(np.sum(fft_power[low_mask]))
+        mid_energy = float(np.sum(fft_power[mid_mask]))
+
+        features.extend([mean_val, std_val, rms_val, p2p_val, kurt_val,
+                         dom_freq, low_energy, mid_energy])
+
+    return np.array(features, dtype=np.float32)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -464,7 +354,6 @@ class MATWIMultimodalDataset(Dataset):
         image_size:         tuple[int, int] = (384, 384),
         feature_set:        Literal["all40", "top25", "raw25"] = "all40",
         sensor_scaler:      Optional[SensorScaler] = None,
-        gate_aircuts:       bool = False,
     ):
         super().__init__()
 
@@ -479,7 +368,6 @@ class MATWIMultimodalDataset(Dataset):
         self.image_size       = image_size
         self.feature_set      = feature_set
         self.sensor_scaler    = sensor_scaler
-        self.gate_aircuts     = gate_aircuts
 
         # Validate feature_set
         if feature_set not in FEATURE_SETS:
@@ -521,7 +409,6 @@ class MATWIMultimodalDataset(Dataset):
               f"n_samples={len(self.df)} | "
               f"wear_cap={wear_cap}µm | feature_set={feature_set} "
               f"({self.n_selected_features} features) | "
-              f"gate_aircuts={self.gate_aircuts} | "
               f"scaler={'fitted' if sensor_scaler else 'None'}")
 
     # ── Properties ────────────────────────────────────────────────────────────
@@ -653,8 +540,7 @@ class MATWIMultimodalDataset(Dataset):
         row         = self.df.iloc[idx]
         sensor_path = self.data_dir / str(row["SensorFile"])
 
-        raw_features = extract_sensor_features(sensor_path,
-                                               gate_aircuts=self.gate_aircuts)
+        raw_features = extract_sensor_features(sensor_path)
 
         if self.sensor_scaler is not None:
             features = self.sensor_scaler.transform(raw_features.reshape(1, -1))[0]
@@ -723,8 +609,7 @@ class MATWIMultimodalDataset(Dataset):
         for i in range(len(self.df)):
             row         = self.df.iloc[i]
             sensor_path = self.data_dir / str(row["SensorFile"])
-            features    = extract_sensor_features(sensor_path,
-                                                  gate_aircuts=self.gate_aircuts)
+            features    = extract_sensor_features(sensor_path)
             all_features.append(features)
             if verbose and (i + 1) % 100 == 0:
                 print(f"  {i+1}/{len(self.df)}")
@@ -818,15 +703,10 @@ def build_multimodal_dataloaders(
     batch_size:       int = 32,
     num_workers:      int = 4,
     scaler_save_path: Optional[str | Path] = None,
-    gate_aircuts:     bool = False,
 ) -> tuple[dict, SensorScaler]:
     """
     Builds train, val, and test DataLoaders in one call.
     Fits the sensor scaler on training data and applies it to val/test.
-
-    gate_aircuts : bool
-        If True, sensor features are computed on the in-cut (tool-engaged)
-        portion of each recording only. The scaler is fit on gated features.
 
     Returns
     -------
@@ -845,7 +725,6 @@ def build_multimodal_dataloaders(
         impute_zero_wear = impute_zero_wear,
         image_size       = image_size,
         feature_set      = feature_set,
-        gate_aircuts     = gate_aircuts,
     )
 
     # Build training dataset and fit scaler
