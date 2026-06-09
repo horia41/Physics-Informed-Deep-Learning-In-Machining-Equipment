@@ -1,1 +1,0 @@
-this is built on top of folder pinnV2, but the data is filtered to remove aircuts, however something went wrong since for the fusion model it didnt provide better performance
