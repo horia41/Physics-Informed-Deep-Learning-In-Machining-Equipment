@@ -1,41 +1,37 @@
 """
-MATWI — Vision Baseline Ablation Training Script
-==================================================
-Runs a grid of experiments to find which undocumented paper settings
-explain the gap between our ResNet50 replication (42 µm) and their
-reported result (30 µm).
+MATWI — Sensor Fusion Ablation Training Script
+=================================================
+Controlled experiment: does adding sensor features improve over vision-only?
 
-Ablation grid (9 experiments, reproducing §5.1 of the README):
-  ResNet50, simple head, fixed LR:
-    1. resnet50_imagenet_L1
-    2. resnet50_imagenet_MSE
-    3. resnet50_dataset_L1
-    4. resnet50_dataset_MSE
-  EfficientNetV2-S, simple head, fixed LR (2×2 norm × loss):
-    5. efficientnetv2_dataset_MSE      <-- headline best (19.0 µm)
-    6. efficientnetv2_imagenet_MSE
-    7. efficientnetv2_dataset_L1
-    8. efficientnetv2_imagenet_L1
-  EfficientNetV2-S, MLP head + OneCycleLR (reference):
-    9. efficientnetv2_imagenet_L1_mlp_sched
+Grid: 3 fusion modes × 3 feature sets + 1 vision-only control = 10 experiments.
+All experiments share identical settings except the sensor integration.
 
-All experiments use:
-  - Sets 1-13, paper split, 664 training images
-  - No augmentation, no oversampling
-  - AdamW (wd=1e-4), batch_size=32, 17 epochs
-  - wear_cap=450, no zero-wear imputation, seed=42
+Reference baseline:
+  efficientnetv2_dataset_MSE (vision-only, 664 samples) = 19.0 µm
+
+Experiments:
+  #0  vision_only_647       — vision-only control on 647-sample multimodal subset
+  #1  early_raw25           — early fusion, 25 time-domain features
+  #2  early_top25           — early fusion, 25 Ridge-selected features
+  #3  early_all40           — early fusion, all 40 features
+  #4  intermediate_raw25    — intermediate fusion, 25 time-domain features
+  #5  intermediate_top25    — intermediate fusion, 25 Ridge-selected features
+  #6  intermediate_all40    — intermediate fusion, all 40 features
+  #7  late_raw25            — late fusion, 25 time-domain features
+  #8  late_top25            — late fusion, 25 Ridge-selected features
+  #9  late_all40            — late fusion, all 40 features
+
+Fixed settings (matching vision-only reference):
+  - EfficientNetV2-S, 384×384, dataset normalisation
+  - MSE loss, fixed LR 3e-4, AdamW (wd=1e-4)
+  - 17 epochs, batch_size=32, no augmentation, no oversampling
+  - Sets 1-13, wear_cap=450, seed=42
 
 Designed for SLURM (Snellius): use --only <name> to run one experiment per job.
 
 Usage:
-  # Run all 5 experiments sequentially:
-  python train_vision.py --data-dir ./data/matwi ...
-
-  # Run a single experiment (for SLURM array jobs):
-  python train_vision.py --only resnet50_imagenet_L1 ...
-
-  # List available experiment names:
-  python train_vision.py --list-experiments
+  python train_vision_sensor.py --data-dir ./data/matwi ... --only early_all40
+  python train_vision_sensor.py --list-experiments
 """
 
 from __future__ import annotations
@@ -47,9 +43,9 @@ import random
 import sys
 import time
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
@@ -80,197 +76,180 @@ def _load_module(name: str, candidates: list[Path]):
 
 
 _DS = _load_module("dataset_module", [
-    _HERE / "DatasetClass_Vision.py",
+    _HERE / "DatasetClass_VisionSensors.py",
 ])
 _MDL = _load_module("model_module", [
-    _HERE / "ResNet_EfficientNet_Vision.py",
+    _HERE / "modelVisionSensorV2.py",
 ])
 
-MATWIVisionDataset = _DS.MATWIVisionDataset
-MATWIVisionModel   = _MDL.MATWIVisionModel
-BACKBONES          = _MDL.BACKBONES
+MATWIMultimodalDataset = _DS.MATWIMultimodalDataset
+SensorScaler           = _DS.SensorScaler
+FEATURE_SETS           = _DS.FEATURE_SETS
+MATWIMultimodalModel   = _MDL.MATWIMultimodalModel
 
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-WEAR_CAP    = 450.0
-WEAR_TYPES  = ["flank_wear", "adhesion", "flank_wear+adhesion"]
+WEAR_CAP   = 450.0
+WEAR_TYPES = ["flank_wear", "adhesion", "flank_wear+adhesion"]
 
 
 # ── Experiment config ─────────────────────────────────────────────────────────
 
 @dataclass
 class ExperimentConfig:
-    name:          str
-    backbone:      str
-    set_range:     str
-    image_size:    tuple[int, int]
-    epochs:        int
-    lr:            float
-    normalisation: str   = "imagenet"
-    loss:          str   = "L1"         # "L1" or "MSE"
-    head_type:     str   = "simple"     # "simple" or "mlp"
-    augment:       bool  = False
-    weight_decay:  float = 1e-4
-    batch_size:    int   = 32
-    use_scheduler: bool  = False
+    name:               str
+    fusion_mode:        str       # "none", "early", "intermediate", "late", "gated"
+    feature_set:        str       # "none", "raw25", "top25", "all40"
+    use_sensors:        bool
+    # Task-3 knobs (default off → reproduces the original Stage 2 grid)
+    modality_dropout_p: float = 0.0
+    # Fixed settings (same for all experiments)
+    set_range:          str   = "1-13"
+    image_size:         tuple = (384, 384)
+    epochs:             int   = 17
+    lr:                 float = 3e-4
+    normalisation:      str   = "dataset"
+    loss:               str   = "MSE"
+    weight_decay:       float = 1e-4
+    batch_size:         int   = 32
+    sensor_encoder_dim: int   = 64
+    dropout_backbone:   float = 0.3
 
 
 # ── Experiment grid ───────────────────────────────────────────────────────────
-# ResNet50 ablations: 2 norms × 2 losses = 4, all simple head, fixed LR
-# EfficientNetV2: our best setup for reference
 
 DEFAULT_EXPERIMENTS = [
-    # ── ResNet50 paper replication ablations ──
+    # ── Vision-only control (on 647-sample multimodal subset) ──
     ExperimentConfig(
-        name          = "resnet50_imagenet_L1",
-        backbone      = "resnet50",
-        set_range     = "1-13",
-        image_size    = (224, 224),
-        epochs        = 17,
-        lr            = 3e-4,
-        normalisation = "imagenet",
-        loss          = "L1",
-        head_type     = "simple",
-        use_scheduler = False,
-    ),
-    ExperimentConfig(
-        name          = "resnet50_imagenet_MSE",
-        backbone      = "resnet50",
-        set_range     = "1-13",
-        image_size    = (224, 224),
-        epochs        = 17,
-        lr            = 3e-4,
-        normalisation = "imagenet",
-        loss          = "MSE",
-        head_type     = "simple",
-        use_scheduler = False,
-    ),
-    ExperimentConfig(
-        name          = "resnet50_dataset_L1",
-        backbone      = "resnet50",
-        set_range     = "1-13",
-        image_size    = (224, 224),
-        epochs        = 17,
-        lr            = 3e-4,
-        normalisation = "dataset",
-        loss          = "L1",
-        head_type     = "simple",
-        use_scheduler = False,
-    ),
-    ExperimentConfig(
-        name          = "resnet50_dataset_MSE",
-        backbone      = "resnet50",
-        set_range     = "1-13",
-        image_size    = (224, 224),
-        epochs        = 17,
-        lr            = 3e-4,
-        normalisation = "dataset",
-        loss          = "MSE",
-        head_type     = "simple",
-        use_scheduler = False,
+        name         = "vision_only_647",
+        fusion_mode  = "none",
+        feature_set  = "none",
+        use_sensors  = False,
     ),
 
-    # ── EfficientNetV2-S, simple head, fixed LR (the 2×2 norm×loss grid) ──
-    # These four reproduce §5.1 of the README, incl. the headline best result
-    # efficientnetv2_dataset_MSE (19.0 µm). They were previously missing from
-    # this grid even though the README reports them.
+    # ── Early fusion ──
     ExperimentConfig(
-        name          = "efficientnetv2_dataset_MSE",
-        backbone      = "efficientnetv2_s",
-        set_range     = "1-13",
-        image_size    = (384, 384),
-        epochs        = 17,
-        lr            = 3e-4,
-        normalisation = "dataset",
-        loss          = "MSE",
-        head_type     = "simple",
-        use_scheduler = False,
+        name         = "early_raw25",
+        fusion_mode  = "early",
+        feature_set  = "raw25",
+        use_sensors  = True,
     ),
     ExperimentConfig(
-        name          = "efficientnetv2_imagenet_MSE",
-        backbone      = "efficientnetv2_s",
-        set_range     = "1-13",
-        image_size    = (384, 384),
-        epochs        = 17,
-        lr            = 3e-4,
-        normalisation = "imagenet",
-        loss          = "MSE",
-        head_type     = "simple",
-        use_scheduler = False,
+        name         = "early_top25",
+        fusion_mode  = "early",
+        feature_set  = "top25",
+        use_sensors  = True,
     ),
     ExperimentConfig(
-        name          = "efficientnetv2_dataset_L1",
-        backbone      = "efficientnetv2_s",
-        set_range     = "1-13",
-        image_size    = (384, 384),
-        epochs        = 17,
-        lr            = 3e-4,
-        normalisation = "dataset",
-        loss          = "L1",
-        head_type     = "simple",
-        use_scheduler = False,
-    ),
-    ExperimentConfig(
-        name          = "efficientnetv2_imagenet_L1",
-        backbone      = "efficientnetv2_s",
-        set_range     = "1-13",
-        image_size    = (384, 384),
-        epochs        = 17,
-        lr            = 3e-4,
-        normalisation = "imagenet",
-        loss          = "L1",
-        head_type     = "simple",
-        use_scheduler = False,
+        name         = "early_all40",
+        fusion_mode  = "early",
+        feature_set  = "all40",
+        use_sensors  = True,
     ),
 
-    # ── EfficientNetV2 MLP-head + OneCycle reference (rank 5 in §5.1) ──
+    # ── Intermediate fusion ──
     ExperimentConfig(
-        name          = "efficientnetv2_imagenet_L1_mlp_sched",
-        backbone      = "efficientnetv2_s",
-        set_range     = "1-13",
-        image_size    = (384, 384),
-        epochs        = 17,
-        lr            = 3e-4,
-        normalisation = "imagenet",
-        loss          = "L1",
-        head_type     = "mlp",
-        use_scheduler = True,
+        name         = "intermediate_raw25",
+        fusion_mode  = "intermediate",
+        feature_set  = "raw25",
+        use_sensors  = True,
+    ),
+    ExperimentConfig(
+        name         = "intermediate_top25",
+        fusion_mode  = "intermediate",
+        feature_set  = "top25",
+        use_sensors  = True,
+    ),
+    ExperimentConfig(
+        name         = "intermediate_all40",
+        fusion_mode  = "intermediate",
+        feature_set  = "all40",
+        use_sensors  = True,
+    ),
+
+    # ── Late fusion ──
+    ExperimentConfig(
+        name         = "late_raw25",
+        fusion_mode  = "late",
+        feature_set  = "raw25",
+        use_sensors  = True,
+    ),
+    ExperimentConfig(
+        name         = "late_top25",
+        fusion_mode  = "late",
+        feature_set  = "top25",
+        use_sensors  = True,
+    ),
+    ExperimentConfig(
+        name         = "late_all40",
+        fusion_mode  = "late",
+        feature_set  = "all40",
+        use_sensors  = True,
     ),
 ]
 
 
+# ── Task-3 grid: fusion improvements WITHOUT Taylor ───────────────────────────
+# 2×2 controlled grid (modality dropout × {intermediate, gated}) on the best
+# feature set from Stage 2 (top25). Each cell differs from its neighbours by
+# exactly one variable. Compare against vision_only_647 (22.4 µm reference).
+#
+#   modality_dropout_p │ fusion_mode
+#   ───────────────────┼──────────────
+#         0.0          │ intermediate   (= Stage 2 best, re-run as task-3 anchor)
+#         0.3          │ intermediate
+#         0.0          │ gated
+#         0.3          │ gated
+
+TASK3_EXPERIMENTS = [
+    ExperimentConfig(
+        name               = "t3_intermediate_top25",
+        fusion_mode        = "intermediate",
+        feature_set        = "top25",
+        use_sensors        = True,
+        modality_dropout_p = 0.0,
+    ),
+    ExperimentConfig(
+        name               = "t3_intermediate_top25_md30",
+        fusion_mode        = "intermediate",
+        feature_set        = "top25",
+        use_sensors        = True,
+        modality_dropout_p = 0.3,
+    ),
+    ExperimentConfig(
+        name               = "t3_gated_top25",
+        fusion_mode        = "gated",
+        feature_set        = "top25",
+        use_sensors        = True,
+        modality_dropout_p = 0.0,
+    ),
+    ExperimentConfig(
+        name               = "t3_gated_top25_md30",
+        fusion_mode        = "gated",
+        feature_set        = "top25",
+        use_sensors        = True,
+        modality_dropout_p = 0.3,
+    ),
+]
+
+# Full registry — Stage 2 ablation + task-3 grid. --only picks any by name.
+ALL_EXPERIMENTS = DEFAULT_EXPERIMENTS + TASK3_EXPERIMENTS
+
+
 # ── Utilities ─────────────────────────────────────────────────────────────────
 
-def set_seed(seed: int, deterministic: bool = True) -> None:
-    """
-    Seed all RNGs. With deterministic=True (default) cuDNN runs in
-    reproducible mode so that small MAE differences between ablation runs
-    reflect the design change being tested, not run-to-run RNG noise — this
-    matters here because conclusions are drawn from 1-7 µm gaps on a
-    647-sample dataset. Pass deterministic=False to trade reproducibility
-    for the ~5-15% speed-up of cuDNN autotuning.
-    """
+def set_seed(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = deterministic
-    torch.backends.cudnn.benchmark     = not deterministic
-
-
-def seed_worker(worker_id: int) -> None:
-    """
-    DataLoader worker init: seed numpy/random in each worker from torch's
-    per-worker base seed so augmentation and any worker-side RNG are
-    reproducible across runs (torch seeds its own RNG per worker already).
-    """
-    worker_seed = torch.initial_seed() % 2**32
-    np.random.seed(worker_seed)
-    random.seed(worker_seed)
+    torch.backends.cudnn.deterministic = False
+    torch.backends.cudnn.benchmark     = True
 
 
 def predictions_to_um(pred: torch.Tensor) -> torch.Tensor:
+    """Convert normalised predictions to µm, clamped to [0, WEAR_CAP]."""
     return (pred.squeeze(-1) * 1000.0).clamp(0.0, WEAR_CAP)
 
 
@@ -301,25 +280,28 @@ def fmt_metrics(m: dict[str, Any]) -> str:
     )
 
 
-def make_criterion(loss_name: str) -> nn.Module:
-    if loss_name == "L1":
-        return nn.L1Loss()
-    elif loss_name == "MSE":
-        return nn.MSELoss()
-    else:
-        raise ValueError(f"Unknown loss: {loss_name}. Use 'L1' or 'MSE'.")
-
-
 # ── Data ──────────────────────────────────────────────────────────────────────
 
 def build_loaders(
-    cfg:             ExperimentConfig,
-    data_dir:        Path,
-    labels_csv:      Path,
-    sets_csv:        Path,
-    num_workers:     int,
-    require_sensors: bool = False,
-) -> dict[str, DataLoader]:
+    cfg:         ExperimentConfig,
+    data_dir:    Path,
+    labels_csv:  Path,
+    sets_csv:    Path,
+    num_workers: int,
+) -> tuple[dict[str, DataLoader], Optional[SensorScaler]]:
+    """
+    Build train/val/test DataLoaders using the multimodal dataset class.
+
+    For all experiments (including vision-only control), we use
+    MATWIMultimodalDataset to ensure identical sample populations
+    (647 train / 300 val / 247 test).
+
+    Returns (loaders_dict, fitted_scaler_or_None).
+    """
+    # For vision-only control, feature_set doesn't matter but we still
+    # need a valid value — use "all40" (features are extracted but ignored)
+    feature_set = cfg.feature_set if cfg.use_sensors else "all40"
+
     common = dict(
         data_dir         = data_dir,
         labels_csv       = labels_csv,
@@ -329,67 +311,65 @@ def build_loaders(
         wear_cap         = WEAR_CAP,
         impute_zero_wear = False,
         image_size       = cfg.image_size,
-        require_sensors  = require_sensors,
+        feature_set      = feature_set,
     )
 
-    # Reproducible shuffle order, tied to the global seed set before this call.
-    g = torch.Generator()
-    g.manual_seed(torch.initial_seed() % 2**32)
-    persistent = num_workers > 0
+    # Build training set and fit scaler
+    train_ds = MATWIMultimodalDataset(
+        **common,
+        split         = "train",
+        augment       = False,
+        sensor_scaler = None,
+    )
+    print(f"\n  Fitting sensor scaler on {len(train_ds)} training samples...")
+    scaler = train_ds.fit_sensor_scaler()
 
-    train_ds = MATWIVisionDataset(**common, split="train", augment=cfg.augment)
     loaders = {
         "train": DataLoader(
             train_ds,
-            batch_size        = cfg.batch_size,
-            shuffle           = True,
-            num_workers       = num_workers,
-            pin_memory        = True,
-            drop_last         = True,
-            worker_init_fn    = seed_worker,
-            generator         = g,
-            persistent_workers = persistent,
+            batch_size  = cfg.batch_size,
+            shuffle     = True,
+            num_workers = num_workers,
+            pin_memory  = True,
+            drop_last   = True,
         ),
     }
 
-    # Sets 14-17 (RVS 304) are only available as a held-out generalisation
-    # split when they are NOT in training, i.e. set_range="1-13". For "1-17"
-    # they are folded into train, so there is nothing held out to evaluate.
-    eval_splits = ["val", "test"]
-    if cfg.set_range == "1-13":
-        eval_splits.append("unseen")
-
-    for split in eval_splits:
-        ds = MATWIVisionDataset(**common, split=split, augment=False)
+    # Val / test loaders
+    for split in ["val", "test"]:
+        ds = MATWIMultimodalDataset(
+            **common,
+            split         = split,
+            augment       = False,
+            sensor_scaler = scaler,
+        )
         if len(ds) == 0:
             print(f"  [warn] split='{split}' empty, skipping.")
             continue
         loaders[split] = DataLoader(
             ds,
-            batch_size        = cfg.batch_size,
-            shuffle           = False,
-            num_workers       = num_workers,
-            pin_memory        = True,
-            drop_last         = False,
-            worker_init_fn    = seed_worker,
-            persistent_workers = persistent,
+            batch_size  = cfg.batch_size,
+            shuffle     = False,
+            num_workers = num_workers,
+            pin_memory  = True,
+            drop_last   = False,
         )
 
     sizes = "  |  ".join(f"{k}: {len(v.dataset)}" for k, v in loaders.items())
     print(f"  Loaders: {sizes}")
-    return loaders
+    return loaders, scaler
 
 
 # ── Training loop ─────────────────────────────────────────────────────────────
 
 def train_one_epoch(
-    model:     nn.Module,
-    loader:    DataLoader,
-    optimizer: torch.optim.Optimizer,
-    scheduler: Optional[torch.optim.lr_scheduler.LRScheduler],
-    criterion: nn.Module,
-    device:    torch.device,
-    log_every: int = 0,
+    model:      nn.Module,
+    loader:     DataLoader,
+    optimizer:  torch.optim.Optimizer,
+    criterion:  nn.Module,
+    device:     torch.device,
+    use_sensors: bool,
+    log_every:  int = 0,
 ) -> dict[str, float]:
     model.train()
     total_loss = 0.0
@@ -401,14 +381,16 @@ def train_one_epoch(
         target    = batch["wear"].to(device, non_blocking=True).unsqueeze(1)
         target_um = batch["wear_raw"].to(device, non_blocking=True)
 
+        sensor_features = None
+        if use_sensors:
+            sensor_features = batch["sensor_features"].to(device, non_blocking=True)
+
         optimizer.zero_grad(set_to_none=True)
-        out  = model(images)
+        out  = model(images, sensor_features)
         loss = criterion(out["wear"], target)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
-        if scheduler is not None:
-            scheduler.step()
 
         pred_um   = predictions_to_um(out["wear"].detach())
         batch_mae = torch.abs(pred_um - target_um).mean().item()
@@ -419,8 +401,7 @@ def train_one_epoch(
         n          += bsz
 
         if log_every > 0 and step % log_every == 0:
-            lr = (scheduler.get_last_lr()[0] if scheduler
-                  else optimizer.param_groups[0]["lr"])
+            lr = optimizer.param_groups[0]["lr"]
             print(f"    step {step:04d}/{len(loader)}  "
                   f"loss={loss.item():.5f}  mae={batch_mae:.1f}µm  lr={lr:.2e}")
 
@@ -429,10 +410,11 @@ def train_one_epoch(
 
 @torch.no_grad()
 def evaluate(
-    model:     nn.Module,
-    loader:    DataLoader,
-    criterion: nn.Module,
-    device:    torch.device,
+    model:       nn.Module,
+    loader:      DataLoader,
+    criterion:   nn.Module,
+    device:      torch.device,
+    use_sensors: bool,
 ) -> dict[str, Any]:
     model.eval()
     all_pred, all_target, all_types = [], [], []
@@ -444,16 +426,20 @@ def evaluate(
         target    = batch["wear"].to(device, non_blocking=True).unsqueeze(1)
         target_um = batch["wear_raw"].cpu().numpy()
 
-        out  = model(images)
+        sensor_features = None
+        if use_sensors:
+            sensor_features = batch["sensor_features"].to(device, non_blocking=True)
+
+        out  = model(images, sensor_features)
         loss = criterion(out["wear"], target)
 
         all_pred.append(predictions_to_um(out["wear"]).cpu().numpy())
         all_target.append(target_um)
         all_types.extend(list(batch["type"]))
 
-        bsz         = images.size(0)
-        total_loss  += loss.item() * bsz
-        n           += bsz
+        bsz        = images.size(0)
+        total_loss += loss.item() * bsz
+        n          += bsz
 
     if not all_pred:
         empty = {f"mae_{wt}_um": math.nan for wt in WEAR_TYPES}
@@ -477,58 +463,56 @@ def run_experiment(
 ) -> dict[str, Any]:
     print(f"\n{'='*80}")
     print(f"  EXPERIMENT: {cfg.name}")
-    print(f"  backbone={cfg.backbone}  head={cfg.head_type}  norm={cfg.normalisation}  "
-          f"loss={cfg.loss}  lr={cfg.lr}  sched={cfg.use_scheduler}")
+    print(f"  fusion={cfg.fusion_mode}  features={cfg.feature_set}  "
+          f"sensors={cfg.use_sensors}  loss={cfg.loss}  lr={cfg.lr}")
     print(f"{'='*80}")
 
     run_dir = output_dir / cfg.name
     run_dir.mkdir(parents=True, exist_ok=True)
 
     # ── Data ──────────────────────────────────────────────────────────────────
-    loaders = build_loaders(
-        cfg             = cfg,
-        data_dir        = args.data_dir,
-        labels_csv      = args.labels_csv,
-        sets_csv        = args.sets_csv,
-        num_workers     = args.num_workers,
-        require_sensors = args.require_sensors,
+    loaders, scaler = build_loaders(
+        cfg         = cfg,
+        data_dir    = args.data_dir,
+        labels_csv  = args.labels_csv,
+        sets_csv    = args.sets_csv,
+        num_workers = args.num_workers,
     )
 
-    # ── Model ─────────────────────────────────────────────────────────────────
-    model = MATWIVisionModel(
-        backbone         = cfg.backbone,
-        head_type        = cfg.head_type,
-        pretrained       = not args.no_pretrained,
-        head_hidden_dim  = args.head_hidden_dim,
-        dropout_backbone = args.dropout_backbone,
-        dropout_head     = args.dropout_head,
-    ).to(device)
+    # Save scaler for reproducibility
+    if scaler is not None:
+        scaler.save(run_dir / "sensor_scaler.pkl")
 
-    # ── Optimiser + scheduler ─────────────────────────────────────────────────
+    # ── Determine n_sensor_features from the dataset ─────────────────────────
+    train_ds = loaders["train"].dataset
+    n_sensor_features = train_ds.n_selected_features
+
+    # ── Model ─────────────────────────────────────────────────────────────────
+    model_kwargs = dict(
+        use_sensors        = cfg.use_sensors,
+        pretrained         = not args.no_pretrained,
+        dropout_backbone   = cfg.dropout_backbone,
+    )
+    if cfg.use_sensors:
+        model_kwargs.update(
+            fusion_mode        = cfg.fusion_mode,
+            n_sensor_features  = n_sensor_features,
+            sensor_encoder_dim = cfg.sensor_encoder_dim,
+            modality_dropout_p = cfg.modality_dropout_p,
+        )
+
+    model = MATWIMultimodalModel(**model_kwargs).to(device)
+
+    # ── Optimiser (fixed LR, no scheduler — matches vision reference) ────────
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr           = cfg.lr,
         weight_decay = cfg.weight_decay,
     )
+    print(f"  Optimiser: AdamW (lr={cfg.lr}, wd={cfg.weight_decay})")
+    print(f"  Scheduler: None (fixed LR={cfg.lr})")
 
-    if cfg.use_scheduler:
-        steps_per_epoch = len(loaders["train"])
-        total_steps     = cfg.epochs * steps_per_epoch
-        scheduler = torch.optim.lr_scheduler.OneCycleLR(
-            optimizer,
-            max_lr           = cfg.lr,
-            total_steps      = total_steps,
-            pct_start        = 0.3,
-            anneal_strategy  = "cos",
-            div_factor       = 25.0,
-            final_div_factor = 1e4,
-        )
-        print(f"  Scheduler: OneCycleLR")
-    else:
-        scheduler = None
-        print(f"  Scheduler: None (fixed LR={cfg.lr})")
-
-    criterion = make_criterion(cfg.loss)
+    criterion = nn.MSELoss()
     print(f"  Loss: {cfg.loss} → {criterion}")
 
     # ── Training loop ─────────────────────────────────────────────────────────
@@ -541,14 +525,15 @@ def run_experiment(
         t0 = time.time()
 
         train_m = train_one_epoch(
-            model, loaders["train"], optimizer, scheduler,
-            criterion, device, log_every=args.log_every,
+            model, loaders["train"], optimizer, criterion,
+            device, cfg.use_sensors, log_every=args.log_every,
         )
-        val_m = evaluate(model, loaders["val"], criterion, device)
+        val_m = evaluate(
+            model, loaders["val"], criterion, device, cfg.use_sensors,
+        )
         elapsed = time.time() - t0
 
-        lr_now = (scheduler.get_last_lr()[0] if scheduler
-                  else optimizer.param_groups[0]["lr"])
+        lr_now = optimizer.param_groups[0]["lr"]
 
         print(
             f"  [{epoch:02d}/{cfg.epochs}]  "
@@ -587,15 +572,17 @@ def run_experiment(
     # ── Final evaluation ──────────────────────────────────────────────────────
     if best_state is not None:
         model.load_state_dict(best_state)
-        print(f"\n  Restored best model (epoch {best_epoch}, val={best_val_mae:.2f}µm)")
+        print(f"\n  Restored best model (epoch {best_epoch}, "
+              f"val={best_val_mae:.2f}µm)")
 
     print(f"\n  --- Final results: {cfg.name} ---")
     final_results: dict[str, dict] = {}
-    for split in [k for k in ("val", "test", "unseen") if k in loaders]:
-        m = evaluate(model, loaders[split], criterion, device)
+    for split in [k for k in ("val", "test") if k in loaders]:
+        m = evaluate(model, loaders[split], criterion, device, cfg.use_sensors)
         final_results[split] = m
         print(f"  [{split:7s}] {fmt_metrics(m)}")
 
+    # ── Save results ──────────────────────────────────────────────────────────
     with open(run_dir / "results.json", "w") as fh:
         json.dump({
             "experiment":      cfg.name,
@@ -627,11 +614,10 @@ def write_comparison(results: list[dict], output_dir: Path) -> None:
         for split, m in res["final_results"].items():
             rows.append({
                 "experiment":                  res["name"],
-                "backbone":                    cfg["backbone"],
-                "head_type":                   cfg["head_type"],
-                "normalisation":               cfg["normalisation"],
-                "loss":                        cfg["loss"],
-                "scheduler":                   cfg["use_scheduler"],
+                "fusion_mode":                 cfg["fusion_mode"],
+                "feature_set":                 cfg["feature_set"],
+                "use_sensors":                 cfg["use_sensors"],
+                "modality_dropout_p":          cfg.get("modality_dropout_p", 0.0),
                 "eval_split":                  split,
                 "best_epoch":                  res["best_epoch"],
                 "best_val_mae_um":             res["best_val_mae_um"],
@@ -642,26 +628,45 @@ def write_comparison(results: list[dict], output_dir: Path) -> None:
                 "n_total":                     m["n_total"],
             })
 
-    # Paper reference
+    # Reference rows
     rows.append({
-        "experiment": "paper_baseline", "backbone": "resnet50",
-        "head_type": "simple", "normalisation": "?", "loss": "?",
-        "scheduler": False, "eval_split": "test", "best_epoch": "—",
-        "best_val_mae_um": "—", "mae_overall_um": 30.0,
-        "mae_flank_wear_um": 14.0, "mae_adhesion_um": 39.0,
-        "mae_flank_wear+adhesion_um": 91.0, "n_total": "—",
+        "experiment": "vision_only_664 (reference)", "fusion_mode": "none",
+        "feature_set": "none", "use_sensors": False, "modality_dropout_p": 0.0,
+        "eval_split": "test", "best_epoch": 14, "best_val_mae_um": "—",
+        "mae_overall_um": 19.0, "mae_flank_wear_um": 16.6,
+        "mae_adhesion_um": 37.2, "mae_flank_wear+adhesion_um": 23.2,
+        "n_total": 254,
+    })
+    rows.append({
+        "experiment": "vision_only_647 (reference)", "fusion_mode": "none",
+        "feature_set": "none", "use_sensors": False, "modality_dropout_p": 0.0,
+        "eval_split": "test", "best_epoch": 15, "best_val_mae_um": "—",
+        "mae_overall_um": 22.4, "mae_flank_wear_um": 20.3,
+        "mae_adhesion_um": 35.1, "mae_flank_wear+adhesion_um": 27.1,
+        "n_total": 247,
+    })
+    rows.append({
+        "experiment": "paper_baseline", "fusion_mode": "none",
+        "feature_set": "none", "use_sensors": False, "modality_dropout_p": 0.0,
+        "eval_split": "test", "best_epoch": "—", "best_val_mae_um": "—",
+        "mae_overall_um": 30.0, "mae_flank_wear_um": 14.0,
+        "mae_adhesion_um": 39.0, "mae_flank_wear+adhesion_um": 91.0,
+        "n_total": 254,
     })
 
     df = pd.DataFrame(rows)
     path = output_dir / "comparison_summary.csv"
     df.to_csv(path, index=False)
 
-    print(f"\n{'='*90}")
-    print("  COMPARISON SUMMARY")
-    print(f"{'='*90}")
-    # Show test results only for a clean overview
-    test_df = df[df["eval_split"] == "test"]
-    print(test_df.to_string(index=False))
+    print(f"\n{'='*100}")
+    print("  SENSOR FUSION ABLATION — TEST SET RESULTS (sorted by overall MAE)")
+    print(f"{'='*100}")
+    test_df = df[df["eval_split"] == "test"].copy()
+    test_df = test_df.sort_values("mae_overall_um")
+    cols = ["experiment", "fusion_mode", "feature_set",
+            "mae_overall_um", "mae_flank_wear_um", "mae_adhesion_um",
+            "mae_flank_wear+adhesion_um", "best_epoch"]
+    print(test_df[cols].to_string(index=False))
     print(f"\n  Full results (all splits) → {path}")
 
 
@@ -669,7 +674,8 @@ def write_comparison(results: list[dict], output_dir: Path) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        description="MATWI vision baseline ablation: head/norm/loss grid."
+        description="MATWI sensor fusion ablation: "
+                    "3 fusion modes × 3 feature sets + vision-only control."
     )
     p.add_argument("--data-dir",    type=Path, required=True)
     p.add_argument("--labels-csv",  type=Path, required=True)
@@ -680,18 +686,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Run only one experiment by name.")
     p.add_argument("--list-experiments", action="store_true",
                    help="Print available experiment names and exit.")
-    p.add_argument("--require-sensors", action="store_true",
-                   help="Restrict to samples that also have sensor data (the "
-                        "647-sample multimodal subset). Default off = full 664.")
 
     p.add_argument("--num-workers",      type=int,   default=4)
     p.add_argument("--seed",             type=int,   default=42)
     p.add_argument("--device",           type=str,   default="auto",
                    choices=["auto", "cpu", "cuda", "mps"])
     p.add_argument("--no-pretrained",    action="store_true")
-    p.add_argument("--head-hidden-dim",  type=int,   default=256)
-    p.add_argument("--dropout-backbone", type=float, default=0.3)
-    p.add_argument("--dropout-head",     type=float, default=0.4)
     p.add_argument("--log-every",        type=int,   default=0)
     return p
 
@@ -711,9 +711,10 @@ def main() -> None:
 
     if args.list_experiments:
         print("Available experiments:")
-        for cfg in DEFAULT_EXPERIMENTS:
-            print(f"  {cfg.name:40s}  backbone={cfg.backbone}  head={cfg.head_type}  "
-                  f"norm={cfg.normalisation}  loss={cfg.loss}  sched={cfg.use_scheduler}")
+        for cfg in ALL_EXPERIMENTS:
+            print(f"  {cfg.name:30s}  fusion={cfg.fusion_mode:15s}  "
+                  f"features={cfg.feature_set:6s}  sensors={cfg.use_sensors}  "
+                  f"mdrop={cfg.modality_dropout_p}")
         sys.exit(0)
 
     output_dir = args.output_dir.resolve()
@@ -723,13 +724,13 @@ def main() -> None:
     device = resolve_device(args.device)
 
     experiments = []
-    for cfg in DEFAULT_EXPERIMENTS:
+    for cfg in ALL_EXPERIMENTS:
         if args.only and cfg.name != args.only:
             continue
         experiments.append(cfg)
 
     if not experiments:
-        available = [c.name for c in DEFAULT_EXPERIMENTS]
+        available = [c.name for c in ALL_EXPERIMENTS]
         print(f"No experiment matched --only='{args.only}'.")
         print(f"Available: {available}")
         sys.exit(1)

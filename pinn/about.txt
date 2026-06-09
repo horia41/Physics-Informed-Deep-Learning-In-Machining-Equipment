@@ -1,0 +1,1 @@
+this is the first try of implementation of taylor, but has some bugs, these were solved in folder pinnV2

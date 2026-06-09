@@ -160,6 +160,7 @@ class MATWIVisionDataset(Dataset):
         wear_cap:           Optional[float] = 450.0,
         impute_zero_wear:   bool = False,
         image_size:         tuple[int, int] = (384, 384),
+        require_sensors:    bool = False,
     ):
         super().__init__()
 
@@ -172,6 +173,11 @@ class MATWIVisionDataset(Dataset):
         self.wear_cap         = wear_cap
         self.impute_zero_wear = impute_zero_wear
         self.image_size       = image_size
+        # When True, restrict to samples that ALSO have sensor data (SensorName
+        # & SensorID present) — reproduces the 647-sample multimodal subset used
+        # by the vision+sensor fusion experiments, so a vision-only run on this
+        # population is directly comparable to fusion. False = full 664 set.
+        self.require_sensors  = require_sensors
 
         # Determine which sets are active for this set_range
         if set_range == "1-13":
@@ -191,7 +197,7 @@ class MATWIVisionDataset(Dataset):
 
         print(f"[MATWIVisionDataset] split={split} | set_range={set_range} | "
               f"norm={normalisation} | augment={self.augment} | "
-              f"n_samples={len(self.df)} | "
+              f"n_samples={len(self.df)} | require_sensors={self.require_sensors} | "
               f"wear_cap={wear_cap}µm | impute_zero={impute_zero_wear}")
 
     # ── Data loading ──────────────────────────────────────────────────────────
@@ -228,6 +234,18 @@ class MATWIVisionDataset(Dataset):
 
         # Require an image
         df = df[df["ImageName"].notna() & df["ImageID"].notna()].copy()
+
+        # Optionally require sensor data too → the 647-sample multimodal subset.
+        # Uses the EXACT filter from DatasetClass_VisionSensors._load_and_filter
+        # so the populations match the fusion experiments sample-for-sample.
+        if self.require_sensors:
+            if {"SensorName", "SensorID"}.issubset(df.columns):
+                df = df[df["SensorName"].notna() & df["SensorID"].notna()].copy()
+            else:
+                raise KeyError(
+                    "require_sensors=True but labels.csv has no SensorName/"
+                    "SensorID columns — cannot build the 647 multimodal subset."
+                )
 
         # Handle missing wear
         if self.impute_zero_wear:
