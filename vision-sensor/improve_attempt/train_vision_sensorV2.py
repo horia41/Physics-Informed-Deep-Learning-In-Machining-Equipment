@@ -27,7 +27,7 @@ Fixed settings (matching vision-only reference):
   - 17 epochs, batch_size=32, no augmentation, no oversampling
   - Sets 1-13, wear_cap=450, seed=42
 
-Designed for SLURM (Snellius): use --only <name> to run one experiment per job.
+Designed for batch use: use --only <name> to run one experiment per process.
 
 Usage:
   python train_vision_sensor.py --data-dir ./data/matwi ... --only early_all40

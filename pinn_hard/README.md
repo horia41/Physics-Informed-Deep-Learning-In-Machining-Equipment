@@ -61,7 +61,7 @@ Training **starts at the physics prediction** and learns bounded corrections.
    - Too large → the band is so wide the constraint is vacuous (≈ unconstrained
      model + offset).
    - Recommended: `--auto-C` sets `C` to the 95th percentile of
-     `|wear − VB_taylor|` over the **train** sets (leakage-free). The SLURM sweep
+     `|wear − VB_taylor|` over the **train** sets (leakage-free). The sweep
      also tries fixed `C ∈ {100,150,200}` µm.
 
 3. **Two demonstrators — vision AND fusion.** The same `HardTaylorConstraint`
@@ -85,28 +85,35 @@ Training **starts at the physics prediction** and learns bounded corrections.
 | `train_vision_sensor_hard.py` | **fusion** trainer; loads the local fusion base (`train_vision_sensorV2.py` + model + dataset) |
 | `train_vision_sensorV2.py`, `modelVisionSensorV2.py`, `DatasetClass_VisionSensors.py` | fusion base (copied from `vision-sensor/improve_attempt/`, clean / no air-cut mods) |
 | `fit_taylor.py`, `taylor_constants.json` | calibration (copied from pinnV2, identical) |
-| `run_taylor_hard_17ep.sh` | SLURM 0–11: vision ctrl + C∈{100,150,200} × 3 seeds |
-| `run_taylor_hard_fusion_17ep.sh` | SLURM 0–11: fusion ctrl + C∈{100,150,200} × 3 seeds |
 | `aggregate_hard.py` | mean±std + Δ vs ctrl, grouped by C (handles vision + fusion) |
 
-All trainers: `--hard`/`--C-um`/`--auto-C`; loss = MSE on the constrained output;
-log correction size + tanh saturation (and gate value for fusion).
+All trainers: `--hard` / `--C-um` / `--auto-C`; loss = MSE on the constrained output;
+log correction size + tanh saturation (and gate value for fusion). The original
+sweep was: ctrl + `C ∈ {100,150,200}` µm, each over 3 seeds (42/43/44), 17 epochs.
 
-## Run (Snellius)
+## Run
 ```bash
-cd $ROOT/pinn_hard
 # constants are already present (copy of pinnV2's); to refit:
 # python fit_taylor.py --labels-csv ../dataset/matwi/labels.csv --sets-csv ../dataset/matwi/sets.csv --out ./taylor_constants.json
 
-# vision
-mkdir -p runs/hard/logs        && sbatch run_taylor_hard_17ep.sh
-# fusion
-mkdir -p runs/hard_fusion/logs && sbatch run_taylor_hard_fusion_17ep.sh
+# vision — hard constraint with C=150 µm (omit --hard for the unconstrained control):
+python train_vision_hard.py \
+    --data-dir ../dataset/matwi --labels-csv ../dataset/matwi/labels.csv \
+    --sets-csv ../dataset/matwi/sets.csv --constants taylor_constants.json \
+    --output-dir runs/hard/stage3_vision --hard --C-um 150 --epochs 17 --seed 42
 
-# when done:
+# fusion — same constraint on the gated t3_gated_top25_md30 model:
+python train_vision_sensor_hard.py \
+    --data-dir ../dataset/matwi --labels-csv ../dataset/matwi/labels.csv \
+    --sets-csv ../dataset/matwi/sets.csv --constants taylor_constants.json \
+    --output-dir runs/hard_fusion/stage3_fusion --base-exp t3_gated_top25_md30 \
+    --hard --C-um 150 --epochs 17 --seed 42
+
+# loop --C-um 100/150/200 and --seed 42/43/44 for the full sweep, then:
 python aggregate_hard.py runs/hard/stage3_vision
 python aggregate_hard.py runs/hard_fusion/stage3_fusion
 ```
+Use `--auto-C` instead of `--C-um` to set the band from the train-set residuals.
 
 ## What to read in the results
 - **Δ vs ctrl** (in `aggregate_hard.py`) and **Δ vs the SOFT result**

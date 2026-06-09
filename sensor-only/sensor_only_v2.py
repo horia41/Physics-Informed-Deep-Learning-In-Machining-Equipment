@@ -15,7 +15,7 @@ from typing import Optional
 # Force UTF-8 stdout/stderr so the box-drawing (─) and µ characters in the
 # progress/summary output don't crash on Windows when piped or redirected
 # (cp1252 default raises UnicodeEncodeError under `... | tail`, `> log.txt`,
-# or SLURM log files). No-op on POSIX / already-UTF-8 streams.
+# or redirected log files). No-op on POSIX / already-UTF-8 streams.
 for _stream in (sys.stdout, sys.stderr):
     try:
         _stream.reconfigure(encoding="utf-8")

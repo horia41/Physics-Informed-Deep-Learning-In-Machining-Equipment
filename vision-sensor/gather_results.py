@@ -1,6 +1,6 @@
 """
 Gather results from all sensor fusion ablation experiments into a comparison table.
-Run this after all SLURM jobs have finished.
+Run this after all experiments have finished.
 
 Usage:
     python gather_results_sensor.py --output-dir ./runs/sensor_ablation
