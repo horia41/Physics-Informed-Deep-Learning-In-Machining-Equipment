@@ -1,30 +1,4 @@
-"""
-MATWI — Stage 3 (HARD constraint): Vision + physics-anchored bounded-residual head
-==================================================================================
-Fork of pinnV2/train_vision_taylor.py. Instead of adding a soft λ·L_physics
-penalty, it reparametrises the model output so the prediction is structurally
-confined to the Taylor band (see taylor_hard.py):
 
-    VB_pred = VB_taylor(s,t) + C·tanh( g_theta(x) )      (HARD constraint)
-
-The loss is then just the plain data MSE on the constrained output — the physics
-lives in the architecture, not the loss, so there is no λ to tune and no soft
-penalty term (adding one would double-count). Pass --hard to enable the
-constraint; omit it to train the unconstrained control (reproduces
-vision_only_ctrl), so a single script gives the clean A/B for RQ3.
-
-It REUSES the Stage-1 dataset/model/loaders via the project's _load_module
-convention (loads ../vision-only/train_vision.py, exactly like the soft Taylor
-trainer), so only the hard-constraint wiring is new here.
-
-    # 1. Unconstrained control (no physics in the output)
-    python train_vision_hard.py --data-dir $D --labels-csv $D/labels.csv \
-        --sets-csv $D/sets.csv --output-dir ./runs/hard --constants ./taylor_constants.json \
-        --name vision_only_ctrl --epochs 17 --seed 42
-
-    # 2. Hard-constrained (band half-width C = 150 µm)
-    python train_vision_hard.py ... --name hard_C150 --hard --C-um 150 --epochs 17 --seed 42
-"""
 
 from __future__ import annotations
 import argparse, importlib.util, json, sys, time

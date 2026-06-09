@@ -1,34 +1,4 @@
-"""
-MATWI — Vision-Only Dataset Class
-===================================
-Handles image loading, cropping, normalisation, and augmentation
-for Stage 1 (EfficientNetV2 vision baseline).
 
-Supports:
-  - Sets 1–13 (paper split) or Sets 1–17 (extended)
-  - Dataset-specific normalisation stats (precomputed per set range)
-  - ImageNet normalisation (for pretrained weight compatibility)
-  - Optional augmentation (safe augmentations only, physically motivated)
-  - Optional adhesion oversampling
-  - wear_cap: cap wear values at 450 µm (paper's stated upper bound)
-  - impute_zero_wear: treat missing wear as 0.0 (new tool) or drop
-  - Wear normalised to [0, 1] by dividing by 1000 (matches paper)
-
-Usage:
-    from DatasetClass_Vision import MATWIVisionDataset
-
-    train_ds = MATWIVisionDataset(
-        data_dir       = "./data/matwi",
-        labels_csv     = "./data/matwi/labels.csv",
-        sets_csv       = "./data/matwi/sets.csv",
-        split          = "train",
-        set_range      = "1-13",
-        normalisation  = "dataset",
-        augment        = False,
-        wear_cap       = 450,
-        impute_zero_wear = False,
-    )
-"""
 
 import os
 import warnings

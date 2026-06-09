@@ -1,47 +1,4 @@
-"""
-MATWI — Stage 3 Phase 1: Offline Taylor calibration
-=====================================================
-Fits the *simple* Taylor tool-life equation  V_c · T^n = C  per material and
-derives a robust, early-stopping-tolerant expected-wear trajectory for every
-training set. Run ONCE, offline, before training. Output is a frozen JSON the
-PyTorch loss module loads.
 
-WHY THE SIMPLE FORM (and not the volumetric V_c·T^n·f_z^m·A_p^u = C)
---------------------------------------------------------------------
-The volumetric exponents m (feed) and u (depth) are NOT identifiable on the
-MATWI training sets:
-  • RVS 304 training sets {12,13}: f_z and A_p are CONSTANT (0.05, 0.5) → the
-    log-design matrix is rank-deficient (rank 2 of 4). m, u cannot be fit.
-  • CK45 training sets {2,5,7,8,10,11}: A_p varies in exactly one set (Set 10),
-    V_c in exactly one (Set 2). Each exponent is pinned by a single point →
-    perfect in-sample fit, zero generalisation.
-This script prints the identifiability diagnostics so the decision is auditable.
-
-WHY NOT THE 300 µm ISO FAILURE ANCHOR FOR TOOL LIFE
----------------------------------------------------
-Across the CK45 training sets the final observed wear ranges from 90 µm (Set 7,
-stopped at 30% of the threshold) to 750 µm (Set 11). Deriving tool life by
-extrapolating each run linearly to 300 µm therefore means extrapolating 3×+ for
-some sets and treating mid-run as "failure" for others — both corrupt the fit,
-because the trajectories are non-linear (quantised steps + late-stage spikes).
-
-Instead we estimate the *mid-life wear RATE* directly:
-    k_s = d(wear)/d(ImageID)  [µm per pass], robustly (Theil–Sen) on the
-    central 15–85% of each run.
-The rate is an observed quantity — no extrapolation, no failure anchor needed to
-get it. Taylor's n then governs how the rate scales with cutting speed:
-    linear wear to a (notional) anchor W_f over life T:  k = W_f / T
-    Taylor:  V·T^n = C  ⇒  log V = (log C − n·log W_f) + n·log k
-    ⇒ regress log(V_s) on log(k_s): slope = n, intercept fixes C given W_f.
-W_f only sets the absolute C scale (and the ceiling clamp); it does NOT affect n.
-
-Usage
------
-    python fit_taylor.py \
-        --labels-csv ./dataset/matwi/labels.csv \
-        --sets-csv   ./dataset/matwi/sets.csv \
-        --out        ./taylor_constants.json
-"""
 
 from __future__ import annotations
 import argparse

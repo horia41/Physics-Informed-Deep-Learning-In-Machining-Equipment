@@ -1,21 +1,3 @@
-"""
-MATWI — Vision-Only Wear Estimation Model
-===========================================
-Supports two backbones and two head types for systematic comparison.
-
-Backbones:
-  1. ResNet50       — paper replication baseline (De Pauw et al., 2023)
-  2. EfficientNetV2-S — our improved backbone (Stage 1)
-
-Head types:
-  "simple"  — Linear(feat_dim, 1). Matches the paper's description:
-              "adjusted the output classifier to output only one class prediction"
-  "mlp"     — Linear → ReLU → Dropout → Linear(1). Richer but adds parameters.
-
-Usage:
-    model = MATWIVisionModel(backbone="resnet50", head_type="simple")     # paper
-    model = MATWIVisionModel(backbone="efficientnetv2_s", head_type="mlp") # ours
-"""
 
 import torch
 import torch.nn as nn

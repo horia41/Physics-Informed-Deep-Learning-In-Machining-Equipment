@@ -1,27 +1,4 @@
-"""
-MATWI — Sensor Feature Sanity Check
-=====================================
-Answers: do the 40 engineered sensor features carry predictive signal for wear?
 
-Approach:
-  1. Extract 40 sensor features for all training samples
-  2. Fit Ridge regression (sensor features → wear) on training set
-  3. Evaluate MAE on val and test, broken down by wear type
-  4. Also report feature importances (which channels/features matter most)
-
-If Ridge MAE is:
-  - <50 µm  → strong signal, fusion should help
-  - 50-80 µm → moderate signal, fusion might help with good architecture
-  - >80 µm  → weak signal, need better features or fusion won't help
-
-This takes ~5 minutes to run (dominated by sensor CSV loading).
-
-Usage:
-    python sensor_sanity_check.py \
-        --data-dir   ./data/matwi \
-        --labels-csv ./data/matwi/labels.csv \
-        --sets-csv   ./data/matwi/sets.csv
-"""
 
 import argparse
 import sys

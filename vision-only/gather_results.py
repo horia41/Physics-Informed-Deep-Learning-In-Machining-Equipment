@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
-"""
-Gather results from all ablation experiments into a single comparison table.
-Run this after all SLURM jobs have finished.
 
-Usage:
-    python gather_results.py --output-dir ./runs/vision_ablation
-"""
 
 import argparse
 import json

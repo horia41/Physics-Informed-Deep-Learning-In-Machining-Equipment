@@ -1,19 +1,4 @@
-"""
-Aggregate the 3-seed vision + fusion baseline runs: average over seeds
-{42,43,44}, show mean ± std per config, for both the val and test splits.
 
-Reads the tree produced by run_vision_baselines_3seed.sh /
-run_fusion_baselines_3seed.sh:
-
-    <root>/<group>/s<seed>/<config>/results.json
-      group  ∈ {vision_664, vision_647, fusion}
-      config ∈ {efficientnetv2_dataset_MSE, resnet50_imagenet_L1,
-                t3_intermediate_top25, t3_gated_top25_md30}
-
-Usage:
-    python aggregate_baselines_3seed.py runs/baselines_3seed
-    python aggregate_baselines_3seed.py /scratch-shared/hionescu/project_pinn/runs/baselines_3seed
-"""
 from __future__ import annotations
 
 import re

@@ -1,21 +1,5 @@
 #!/usr/bin/env python
-"""
-Quick sanity check that the wavelet air-cut detector actually trims each sensor
-recording BEFORE you burn GPU hours on the array.
 
-It imports the LOCAL DatasetClass (the wavelet version in this folder), runs the
-exact `wavelet_cut_window` the training pipeline uses on a handful of real sensor
-CSVs, and prints per-file: total samples, the detected [start, end) cutting
-window, the kept fraction, and the % removed as air cut. It also confirms the
-gated vs ungated 40-feature vectors differ (i.e. gating actually changes inputs).
-
-Run on the login node (CPU, seconds):
-    cd /scratch-shared/hionescu/project_pinn/pinn_aircutsV2
-    python check_aircuts.py \
-        --data-dir   /scratch-shared/hionescu/project_pinn/dataset/matwi \
-        --labels-csv /scratch-shared/hionescu/project_pinn/dataset/matwi/labels.csv \
-        --n 12
-"""
 import argparse
 import importlib.util
 import re

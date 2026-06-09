@@ -1,38 +1,4 @@
-"""
-MATWI — Sensor Fusion Ablation Training Script
-=================================================
-Controlled experiment: does adding sensor features improve over vision-only?
 
-Grid: 3 fusion modes × 3 feature sets + 1 vision-only control = 10 experiments.
-All experiments share identical settings except the sensor integration.
-
-Reference baseline:
-  efficientnetv2_dataset_MSE (vision-only, 664 samples) = 19.0 µm
-
-Experiments:
-  #0  vision_only_647       — vision-only control on 647-sample multimodal subset
-  #1  early_raw25           — early fusion, 25 time-domain features
-  #2  early_top25           — early fusion, 25 Ridge-selected features
-  #3  early_all40           — early fusion, all 40 features
-  #4  intermediate_raw25    — intermediate fusion, 25 time-domain features
-  #5  intermediate_top25    — intermediate fusion, 25 Ridge-selected features
-  #6  intermediate_all40    — intermediate fusion, all 40 features
-  #7  late_raw25            — late fusion, 25 time-domain features
-  #8  late_top25            — late fusion, 25 Ridge-selected features
-  #9  late_all40            — late fusion, all 40 features
-
-Fixed settings (matching vision-only reference):
-  - EfficientNetV2-S, 384×384, dataset normalisation
-  - MSE loss, fixed LR 3e-4, AdamW (wd=1e-4)
-  - 17 epochs, batch_size=32, no augmentation, no oversampling
-  - Sets 1-13, wear_cap=450, seed=42
-
-Designed for SLURM (Snellius): use --only <name> to run one experiment per job.
-
-Usage:
-  python train_vision_sensor.py --data-dir ./data/matwi ... --only early_all40
-  python train_vision_sensor.py --list-experiments
-"""
 
 from __future__ import annotations
 

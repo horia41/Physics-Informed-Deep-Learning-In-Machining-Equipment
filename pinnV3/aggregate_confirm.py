@@ -1,14 +1,4 @@
-"""
-Aggregate the Stage-3 CONFIRMATION runs: average over seeds, show mean ± std,
-and delta vs the matched control (same family, same epoch count).
 
-Reads run names like:
-  vision_only_ctrl_e34_s42 | vis_taylor_sym_l0.5_e17_s43 |
-  t3gated_taylor_ceil_l0.5_e34_s44
-
-    python aggregate_confirm.py \
-        runs/confirm/stage3_vision runs/confirm/stage3_fusion
-"""
 from __future__ import annotations
 import json, re, sys
 from pathlib import Path

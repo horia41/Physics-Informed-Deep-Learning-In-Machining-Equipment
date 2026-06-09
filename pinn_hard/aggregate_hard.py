@@ -1,10 +1,4 @@
-"""
-Aggregate the HARD-constraint runs: average over seeds, mean ± std, and delta
-vs the unconstrained control. Groups by the band half-width C (read from each
-results.json "hard" block) rather than by lambda (there is no lambda here).
 
-    python aggregate_hard.py runs/hard/stage3_vision
-"""
 from __future__ import annotations
 import json, re, sys
 from pathlib import Path

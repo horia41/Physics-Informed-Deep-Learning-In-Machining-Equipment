@@ -1,37 +1,4 @@
-"""
-MATWI — Stage 3 Phase 2: Taylor physics-informed loss (PyTorch)
-================================================================
-Differentiable penalty that regularises the vision model toward a physically
-plausible wear trajectory, targeting the adhesion *overprediction* failure mode
-on RVS 304 (molten material welds to the tip and tricks the CNN into reading
-high wear).
 
-Formulation  (supervisor brief: "expected wear at elapsed time t, linear in
-mid-life"):
-    For sample i in set s at pass ImageID_i,
-        VB_expected_i = clip( a_s + b_s · ImageID_i ,  0,  W_f )      [µm]
-    where (a_s, b_s) is the frozen, spike-robust mid-life line fit offline
-    (fit_taylor.py). Optionally b_s is replaced by the Taylor-predicted slope
-    W_f / T_taylor(Vc_s) so that the cross-set rate ordering obeys Vc·T^n = C.
-
-    L_physics = mean_i [ w_i · pen( VB_pred_i − VB_expected_i )^2 ]   (normalised /1000)
-    pen(x) = x                (symmetric, default)
-           = relu(x)          (one-sided "ceiling": only punish overprediction)
-    L_total   = L_data + λ(epoch) · L_physics
-
-Guardrails baked in:
-    • Set 1 excluded (unknown cutting params).
-    • Penalty applied ONLY inside the per-set mid-life window [15%, 85%] of the
-      run — respects break-in / catastrophic-failure non-linearity and the
-      early-stop distortion.
-    • Caution sets (6 variable feed, 17 z=2) down-weighted.
-    • Material gating: enforce on RVS only / CK45 only / both.
-    • λ linear warm-up so physics does not dominate before the backbone settles.
-
-This module loads the frozen constants produced by fit_taylor.py. It never
-learns n / C / slopes (supervisors: learnable constants make it "no longer a
-hybrid approach").
-"""
 
 from __future__ import annotations
 import json

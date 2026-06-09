@@ -1,5 +1,10 @@
 # pinn_hard — HARD physics constraint (RQ3)
 
+> **Version lineage:** built on **`pinnV2`**, but replaces its *soft* `λ·L_physics`
+> penalty with a **hard** architectural constraint (the physics moves from the loss
+> into the model). This is the project's answer to **RQ3**. Directly comparable to
+> the soft result from `pinnV2`. See the root [`README.md`](../README.md) §8 (RQ3).
+
 Hard-constraint counterpart to the soft `λ·L_physics` penalty in `pinn*/`. Instead
 of *penalising* wear-law violations in the loss, the prediction is reparametrised
 so violations are **mathematically impossible by construction** — directly

@@ -1,14 +1,4 @@
-"""
-Aggregate the air-cut Stage-3 runs: average over seeds, show mean ± std, and
-delta vs the matched control (same family, same epoch count).
 
-Identical logic to pinnV2/aggregate_confirm.py — only the run layout differs
-(runs/aircuts/stage3_fusion). Reads run names like:
-  t3gated_ctrl_aircuts_e17_s42 |
-  t3gated_taylor_ceil_aircuts_l0.5_tslope_e17_s44
-
-    python aggregate_confirm.py runs/aircuts/stage3_fusion
-"""
 from __future__ import annotations
 import json, re, sys
 from pathlib import Path

@@ -1,14 +1,4 @@
-"""
-Aggregate Stage-3 Taylor results into before/after tables.
 
-Reads every results.json under each given run directory and prints, per family,
-a table sorted by test overall MAE, with deltas vs that family's control
-(the run whose name contains 'ctrl'). Also writes stage3_summary.csv.
-
-    python aggregate_stage3.py \
-        /scratch-shared/hionescu/project_pinn/pinn/runs/stage3_vision \
-        /scratch-shared/hionescu/project_pinn/pinn/runs/stage3_fusion
-"""
 from __future__ import annotations
 import json, sys
 from pathlib import Path

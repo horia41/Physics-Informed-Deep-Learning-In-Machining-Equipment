@@ -1,5 +1,13 @@
 # pinn_aircuts — t3_gated_top25_md30 + Taylor, WITH air-cut gating
 
+> **Version lineage:** built on **`pinnV2`** (the canonical soft-constraint Taylor
+> version). The single added variable is **air-cut removal** on the sensor features.
+> Outcome: for the *fusion* model this did **not** beat the no-air-cut control
+> (see the recorded numbers in `what_we_need_here_&_results.txt`). The follow-up
+> **`pinn_aircutsV2`** revalidates the air-cut window with a diagnostic
+> (`check_aircuts.py`) and a cleaner control ablation. See the root
+> [`README.md`](../README.md) §5.3.1–5.3.2 for the full air-cut story.
+
 Self-contained replica of the **fusion half** of `pinnV2/run_taylorV2_17ep.sh`
 (model `t3_gated_top25_md30`, 17 epochs, 3 seeds), but every run computes sensor
 features on the **tool-engaged window only** (air cuts removed). Everything
@@ -8,8 +16,9 @@ needed lives in this folder — nothing is imported from sibling folders.
 ## What "air cuts" means / what changed
 Each ~50–60 s sensor recording starts with the tool approaching the workpiece
 (no contact) and ends with it retracting; ~28–46 % of every CSV is this silent
-"air cut". With `--gate-aircuts`, an acoustic+accelerometer envelope detector
-(`in_cut_mask`) trims those phases before feature extraction. Band-energy
+"air cut". With `--gate-aircuts`, a **wavelet edge-detector** (`wavelet_cut_window`
+— db4 level-4 DWT on the vibration + acoustic channels) finds the single cutting
+window and trims the approach/retract phases before feature extraction. Band-energy
 features are also the **relative** form (`band / total power`) so they are
 length-invariant — required because gated windows vary in length. The 40-feature
 layout, `top25` selection, and the model are otherwise unchanged, so this is the

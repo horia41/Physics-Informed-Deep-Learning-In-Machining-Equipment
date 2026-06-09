@@ -1,28 +1,3 @@
-"""
-MATWI — Stage 3 (HARD constraint): Vision+Sensor (gated fusion) + bounded residual
-==================================================================================
-Fusion counterpart of train_vision_hard.py. Here g_theta uses BOTH modalities:
-
-    VB_pred = VB_taylor(s,t) + C·tanh( g_theta(image, sensor) )      (HARD)
-
-g_theta = the gated-fusion model (MATWIMultimodalModel, base config
-t3_gated_top25_md30 — gated fusion, top25 sensor features, modality dropout 0.3),
-so the bounded correction is driven by image + sensor. The physics anchor and the
-hard reparametrisation are identical to the vision case and reuse taylor_hard.py
-unchanged (the constraint is modality-agnostic: it only needs the raw output +
-set_id + ImageID). Loss = plain data MSE on the constrained output (no lambda).
-
-Self-contained: loads its fusion base (train_vision_sensorV2.py + model + dataset)
-and taylor_hard.py from THIS folder. Uses the clean (non-air-cut) DatasetClass so
-results are directly comparable to the pinnV2 soft-fusion runs.
-
-Pass --hard to enable the constraint; omit it for the unconstrained fusion control
-(reproduces t3gated_ctrl).
-
-    python train_vision_sensor_hard.py --data-dir $D --labels-csv $D/labels.csv \
-        --sets-csv $D/sets.csv --output-dir ./runs/hard_fusion --constants ./taylor_constants.json \
-        --base-exp t3_gated_top25_md30 --name hard_C150 --hard --C-um 150 --epochs 17 --seed 42
-"""
 
 from __future__ import annotations
 import argparse, importlib.util, json, sys, time

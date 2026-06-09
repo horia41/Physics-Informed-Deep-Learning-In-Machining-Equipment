@@ -1,42 +1,4 @@
-"""
-MATWI — Vision Baseline Ablation Training Script
-==================================================
-Runs a grid of experiments to find which undocumented paper settings
-explain the gap between our ResNet50 replication (42 µm) and their
-reported result (30 µm).
 
-Ablation grid (9 experiments, reproducing §5.1 of the README):
-  ResNet50, simple head, fixed LR:
-    1. resnet50_imagenet_L1
-    2. resnet50_imagenet_MSE
-    3. resnet50_dataset_L1
-    4. resnet50_dataset_MSE
-  EfficientNetV2-S, simple head, fixed LR (2×2 norm × loss):
-    5. efficientnetv2_dataset_MSE      <-- headline best (19.0 µm)
-    6. efficientnetv2_imagenet_MSE
-    7. efficientnetv2_dataset_L1
-    8. efficientnetv2_imagenet_L1
-  EfficientNetV2-S, MLP head + OneCycleLR (reference):
-    9. efficientnetv2_imagenet_L1_mlp_sched
-
-All experiments use:
-  - Sets 1-13, paper split, 664 training images
-  - No augmentation, no oversampling
-  - AdamW (wd=1e-4), batch_size=32, 17 epochs
-  - wear_cap=450, no zero-wear imputation, seed=42
-
-Designed for SLURM (Snellius): use --only <name> to run one experiment per job.
-
-Usage:
-  # Run all 5 experiments sequentially:
-  python train_vision.py --data-dir ./data/matwi ...
-
-  # Run a single experiment (for SLURM array jobs):
-  python train_vision.py --only resnet50_imagenet_L1 ...
-
-  # List available experiment names:
-  python train_vision.py --list-experiments
-"""
 
 from __future__ import annotations
 

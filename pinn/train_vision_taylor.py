@@ -1,35 +1,4 @@
-"""
-MATWI — Stage 3: Vision + Taylor Physics-Informed training
-===========================================================
-Fork of train_vision.py that adds the frozen-constant Taylor physics penalty.
-It REUSES the Stage-1 building blocks (dataset, model, loaders, evaluate,
-metrics) via the project's `_load_module` convention, so the only new code is
-the physics wiring. Everything else (minimal setup: no aug, no oversampling,
-simple head) is kept identical for a clean controlled comparison.
 
-Run the physics experiment AND its matched vision-only control with the SAME
-data loss so the only difference is the physics term:
-
-    # 0. Fit constants offline first (login node — needs internet only for nothing here)
-    python fit_taylor.py --labels-csv $D/labels.csv --sets-csv $D/sets.csv \
-                         --out ./taylor_constants.json
-
-    # 1. Vision-only control (lambda 0)
-    python train_vision_taylor.py --data-dir $D --labels-csv $D/labels.csv \
-        --sets-csv $D/sets.csv --output-dir ./runs/stage3 \
-        --constants ./taylor_constants.json --name vision_only_ctrl --lambda-max 0.0
-
-    # 2. Vision + Taylor (symmetric)
-    python train_vision_taylor.py ... --name vis_taylor_l05 --lambda-max 0.05
-
-    # 3. Vision + Taylor as an adhesion CEILING on RVS only (recommended variant)
-    python train_vision_taylor.py ... --name vis_taylor_ceil_rvs \
-        --lambda-max 0.05 --one-sided --apply-to rvs
-
-Compare against the known references: vision-only full-664 = 19.0 µm,
-vision-only multimodal-647 = 22.4 µm. The win condition is lower F+A / adhesion
-MAE WITHOUT regressing flank-wear MAE.
-"""
 
 from __future__ import annotations
 import argparse, importlib.util, json, math, sys, time

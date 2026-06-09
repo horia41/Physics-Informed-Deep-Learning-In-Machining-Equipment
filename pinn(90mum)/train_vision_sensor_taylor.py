@@ -1,28 +1,4 @@
-"""
-MATWI — Stage 3: Vision+Sensor (gated fusion) + Taylor physics loss
-====================================================================
-Fork of train_vision_sensor.py. REUSES its loaders / model / eval via the
-project's _load_module convention and only adds the frozen-constant Taylor
-physics penalty (taylor_physics_loss.py). The data loss, optimiser (fixed-LR
-AdamW, no scheduler), and 647/300/247 multimodal splits are kept identical to
-the Stage-2/task-3 setup so the only variable vs. the control is the physics.
 
-Default base model = t3_gated_top25_md30 (gated fusion, top25 features,
-modality dropout 0.3) — the only fusion config that beat the vision-only-647
-control. Pass --base-exp to use a different one from train_vision_sensor.py.
-
-Single seed (42) by design: this run answers "does physics help, yes/no?" for
-the best fusion model, not "is a 1 µm gap significant?".
-
-Bonus: logs the mean learned gate value each epoch (out["gate"]), so you can
-see whether the gated model is actually using the sensors or has learned to
-suppress them.
-
-    python train_vision_sensor_taylor.py \
-        --data-dir $D --labels-csv $D/labels.csv --sets-csv $D/sets.csv \
-        --output-dir ./runs/stage3_fusion --constants ./taylor_constants.json \
-        --name t3gated_taylor_sym --lambda-max 0.05 --apply-to all
-"""
 
 from __future__ import annotations
 import argparse, importlib.util, json, sys, time
@@ -68,7 +44,11 @@ predictions_to_um    = _TVS.predictions_to_um
 fmt_metrics          = _TVS.fmt_metrics
 set_seed             = _TVS.set_seed
 resolve_device       = _TVS.resolve_device
-ALL_EXPERIMENTS      = _TVS.ALL_EXPERIMENTS
+# The non-V2 fusion base exposes its grid as DEFAULT_EXPERIMENTS; the V2 base also
+# defines ALL_EXPERIMENTS. Accept whichever exists so this trainer works against
+# either base (mirrors the fix already applied in pinn/train_vision_sensor_taylor.py).
+ALL_EXPERIMENTS      = getattr(_TVS, "DEFAULT_EXPERIMENTS",
+                               getattr(_TVS, "ALL_EXPERIMENTS", []))
 TaylorPhysicsLoss    = _TPL.TaylorPhysicsLoss
 
 
