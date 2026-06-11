@@ -2,14 +2,14 @@
 
 ## 1. Overview of steps
 Our project follows 4 stages:
-1. **Vision-only baseline** — establish reference performance with images alone - **DONE**
-2. **Multimodal sensor fusion** — test whether adding sensor data improves predictions - **DONE**
-3. **Physics-informed loss (Taylor's equation)** — add physical constraints to the model - **NEXT**
-4. **Refinement & compression** — hard constraints, pruning, quantisation for edge deployment - **NEXT**
+1. **Vision-only baseline** — establish reference performance with images alone — **DONE** (`vision-only/`)
+2. **Multimodal sensor fusion** — test whether adding sensor data improves predictions — **DONE** (`vision-sensor/`, `sensor-only/`)
+3. **Physics-informed loss (Taylor's equation)** — add physical constraints to the model — **IMPLEMENTED** across the `pinn*/` variants (soft penalty, volumetric exploration, air-cut, hard constraint — see §3.1)
+4. **Refinement & compression** — pruning, quantisation for edge deployment — **NEXT** (the hard-constraint piece is started in `pinn_hard/`)
 
 > **Maintenance note:** a round of correctness/reproducibility fixes was applied to the
 > shared pipeline (determinism, the full vision grid, held-out unseen evaluation, sensor
-> caching, etc.). See [BUGFIXES.md](BUGFIXES.md) for exactly what changed and why.
+> caching, etc.). See [BUGFIXES.md](helper_markdowns/BUGFIXES.md) for exactly what changed and why.
 
 ---
 
@@ -74,38 +74,61 @@ All code lives under the project root with this structure:
  
 ```
 project_pinn(or however you named it)/
-├── dataset/
+├── dataset/                       # Data download + exploration
 │   ├── download_data.py           # Downloads MATWI from KU Leuven Dataverse
 │   ├── EDA.py                     # Exploratory data analysis (10 plots)
 │   └── matwi/                     # Downloaded data (labels.csv, sets.csv, Set1–17/)
+│                                  #   (a raw unzipped copy may also sit at ./matwi/ — see matwi/README.md)
 │
-├── vision-only/                   # Stage 1 — Vision 
+├── vision-only/                   # Stage 1 — Vision baseline
 │   ├── DatasetClass_Vision.py     # Vision-only PyTorch Dataset
 │   ├── ResNet_EfficientNet_Vision.py  # Model class (ResNet50 / EfficientNetV2)
 │   ├── train_vision.py            # Vision ablation training script (9 experiments)
-│   ├── gather_results.py          # Results aggregator
-│   └── run_vision_ablation.sh     # SLURM job script for Snellius
+│   └── gather_results.py          # Results aggregator
 │
-├── vision-sensor/                 # Stage 2 — Vision & Sensor 
+├── vision-sensor/                 # Stage 2 — Vision & Sensor fusion
 │   ├── DatasetClass_VisionSensors.py  # Multimodal Dataset (images + 40 sensor features,
-│   │                                  #   now with optional air-cut gating)
+│   │                                  #   with optional air-cut gating)
 │   ├── modelVisionSensor.py       # Multimodal model (early/intermediate/late fusion)
-│   ├── modelVisionSensorV2.py     # v3 model: adds "gated" fusion + modality dropout
+│   ├── modelVisionSensorV2.py     # v2 model: adds "gated" fusion + modality dropout
 │   ├── train_vision_sensor.py     # Sensor fusion training (10 + 3 air-cut experiments)
-│   ├── train_vision_sensorV2.py   # Task-3 grid incl. t3_gated_top25_md30 (+ air-cut variant)
 │   ├── gather_results.py          # Results aggregator
-│   └── run_sensor_ablation.sh     # SLURM job script for Snellius (array 0–12)
+│   └── improve_attempt/           # Task-3 grid (train_vision_sensorV2.py + V2 model/dataset)
 │
 ├── sensor-only/                   # Stage 2b — Sensor-only deep dive
 │   ├── sensor_check.py            # v1 baseline: Ridge on 40 hand features (56 µm)
 │   ├── sensor_only_v2.py          # v2 pipeline: richer features, per-set delta,
 │   │                              #   air-cut filtering, per-pass features, LightGBM, LOSO
-│   ├── sensor_only_report.tex     # Full technical write-up (compiles to PDF)
-│   └── sensor_check.sh            # SLURM job script for Snellius
+│   └── sensor_only_report.tex     # Full technical write-up (compiles to PDF)
 │
-├── pinn/                          # Stage 3 — Taylor physics  (IN PROGRESS)
+├── pinn/  pinnV2/  pinnV3/        # Stage 3 — Taylor physics loss (several variants — see §3.1)
+├── pinn(90mum)/                   #   each folder has its own README.md
+├── pinn_aircuts/  pinn_aircutsV2/ #
+├── pinn_hard/                     #
+│
+├── aggregate_baselines_3seed.py   # Aggregates the 3-seed vision/sensor/sensor-only baselines
+├── tests/smoke_test.py            # End-to-end smoke test on a synthetic dataset (no GPU/data needed)
+├── helper_markdowns/              # Change logs & bug-fix notes (BUGFIXES.md) — not needed to run
 └── runs/                          # All experiment outputs (history, checkpoints, results)
 ```
+
+### 3.1 The Stage-3 `pinn*` variants
+
+Stage 3 (Taylor's physics loss) was developed as a series of sibling folders. They
+all share the same calibration/loss/trainer skeleton; each isolates **one** change.
+**`pinnV2` is the canonical soft-constraint version** — start there. Each folder has
+its own `README.md` with details and run commands.
+
+| Folder | Built on | What this version does | One-liner |
+|---|---|---|---|
+| [`pinn/`](pinn/README.md) | — | First Taylor implementation (prototype, has bugs) + λ/slope sweep scripts | superseded by `pinnV2` |
+| [`pinnV2/`](pinnV2/README.md) | `pinn` | **Canonical** soft penalty `L = L_data + λ·L_physics`; vision + gated fusion | **use this one** |
+| [`pinnV3/`](pinnV3/README.md) | `pinnV2` | Explores the **volumetric** Taylor form; identifiability check rejects it → falls back to simple form | auditable formula choice |
+| [`pinn(90mum)/`](pinn%2890mum%29/README.md) | `pinn`/`pinnV2` | Same loss but Taylor anchored to the **90 µm** ISO failure threshold (vs 300 µm) | failure-anchor variant |
+| [`pinn_aircuts/`](pinn_aircuts/README.md) | `pinnV2` | Adds **air-cut removal** to the fusion sensor features; did **not** beat control | first air-cut try |
+| [`pinn_aircutsV2/`](pinn_aircutsV2/README.md) | `pinnV2` | **Revised** air-cut removal: validated wavelet window + `check_aircuts.py` + clean control | improved air-cut |
+| [`pinn_hard/`](pinn_hard/README.md) | `pinnV2` | **Hard** architectural constraint instead of the soft penalty (project RQ3) | hard constraint |
+
 ---
 
 ## 4. How The Pipeline Works
@@ -136,7 +159,7 @@ project_pinn(or however you named it)/
   begins with the tool approaching the workpiece (no contact) and ends with it retracting; 
   this "air-cut" silence is ~25% of every recording. A **wavelet edge-detector**
   (`wavelet_cut_window`, adopted from the previous group's `RemoveAircuts/` notebook — db4
-  level-4 DWT on the vibration + acoustic channels, see [BUGFIXES.md](BUGFIXES.md) §10)
+  level-4 DWT on the vibration + acoustic channels, see [BUGFIXES.md](helper_markdowns/BUGFIXES.md) §10)
   finds the single cutting window and crops to it before feature extraction. The 40-feature
   layout is unchanged, so `top25`/`raw25` and the fusion model are unaffected; the scaler is
   re-fit on gated features.
@@ -182,7 +205,7 @@ project_pinn(or however you named it)/
 - **Held-out unseen split (NEW):** with `set_range="1-13"`, sets 14–17
   (RVS 304, never in training) are now evaluated as an `unseen` generalisation
   split. Previously this split was silently emptied by an over-eager set
-  filter (see [BUGFIXES.md](BUGFIXES.md)).
+  filter (see [BUGFIXES.md](helper_markdowns/BUGFIXES.md)).
  
 ---
 
@@ -202,7 +225,7 @@ dataset-specific), loss (L1 vs MSE), head type (simple vs MLP).
 > `DEFAULT_EXPERIMENTS` and can be listed with `--list-experiments`. (The four
 > EfficientNetV2 simple-head configs — including the headline
 > `efficientnetv2_dataset_MSE` — were previously missing from the script; see
-> [BUGFIXES.md](BUGFIXES.md).)
+> [BUGFIXES.md](helper_markdowns/BUGFIXES.md).)
  
 **Results (test set MAE in µm, sorted by overall):**
  
@@ -315,10 +338,10 @@ dataset class (647 train) for all runs including the vision-only control.
 Each sensor recording is ~25% "air cut" — the tool approaching and retracting with no 
 material contact. Three gated fusion experiments were added (`intermediate_top25_gated`, 
 `early_top25_gated`, `intermediate_all40_gated`), each identical to its ungated twin except 
-`gate_aircuts=True`. They isolate whether removing air cuts helps fusion. Run them on 
-Snellius via `run_sensor_ablation.sh` (array indices 10–12) and compare `*_gated` against 
-the base name. Air-cut removal now uses the **wavelet edge-detector** (§4.1, 
-[BUGFIXES.md](BUGFIXES.md) §10). *(Expectation from the sensor-only deep dive (§5.4): with 
+`gate_aircuts=True`. They isolate whether removing air cuts helps fusion. Run each
+`*_gated` config with `train_vision_sensor.py --only <name>` and compare it against 
+its ungated twin. Air-cut removal now uses the **wavelet edge-detector** (§4.1, 
+[BUGFIXES.md](helper_markdowns/BUGFIXES.md) §10). *(Expectation from the sensor-only deep dive (§5.4): with 
 this detector, air-cut removal is the best sensor-only result and clearly improves 
 flank+adhesion (24.8 → 20.1 µm) — so for fusion, whose value is in the hard adhesion cases, 
 it is worth measuring whether the same F+A gain carries over.)*
@@ -338,17 +361,16 @@ A ready-made air-cut twin, **`t3_gated_top25_md30_gated`**, is in the grid.
 
 **Where the gated model lives (corrected).** The gated-fusion grid (`t3_gated_top25_md30`)
 and its air-cut twin are defined in **`train_vision_sensorV2.py`**, which ships in
-**`pinn_aircuts/`** (see [`pinn_aircuts/README_AIRCUTS.md`](pinn_aircuts/README_AIRCUTS.md))
+**`pinn_aircuts/`** (see [`pinn_aircuts/README.md`](pinn_aircuts/README.md))
 and `vision-sensor/improve_attempt/`. The Taylor fusion trainer in **`pinn_aircuts/`**
 is the one that defaults to `--base-exp t3_gated_top25_md30`, accepts `--gate-aircuts`,
-and runs the physics × air-cut SLURM array (`run_taylor_aircuts_17ep.sh`).
+and runs the physics × air-cut grid.
 
 The **`pinn/`** Taylor fusion trainer is a *different* (non-gated) lineage: it resolves
 its base experiments from `vision-sensor/train_vision_sensor.py` (the non-gated grid:
 `vision_only_647`, early/intermediate/late × raw25/top25/all40) and defaults to
-`--base-exp intermediate_top25`. `pinn/run_taylor_fusion.sh` references the gated base
-name in its `--base-exp` for historical reasons; to actually run the gated config use
-`pinn_aircuts/`. Run the gated model with air cuts directly via:
+`--base-exp intermediate_top25`. To run the gated config use `pinn_aircuts/`. Run the
+gated model with air cuts directly via:
 ```bash
 python train_vision_sensorV2.py --data-dir data/matwi --labels-csv data/matwi/labels.csv \
     --sets-csv data/matwi/sets.csv --output-dir runs/task3 --only t3_gated_top25_md30_gated
@@ -365,7 +387,7 @@ bands, robust spread, within-pass windowed-RMS trend, force resultant); per-set 
 features (subtract each set's unworn-baseline signature); cutting-parameter features; 
 **air-cut removal** via the **wavelet edge-detector** adopted from the previous group's
 `RemoveAircuts/` notebook (db4 level-4 DWT on vibration + acoustic → single cutting window;
-see [BUGFIXES.md](BUGFIXES.md) §10); both Ridge and LightGBM; evaluated on the official
+see [BUGFIXES.md](helper_markdowns/BUGFIXES.md) §10); both Ridge and LightGBM; evaluated on the official
 split **and** leave-one-set-out (LOSO) CV. To compare with vs without air cuts, run the
 script once and read the `*_v2_*` (no air cut) vs `*_v3_*`/`*_v4_*` (wavelet air cut) rows
 in `results.csv`. Note: the wavelet detector yields a single window, so **`v4` ≡ `v3`** (v4
@@ -395,7 +417,7 @@ is kept only for column compatibility). The detector keeps ~75 % of each recordi
 3. **Detector choice flips the conclusion.** With our earlier envelope detector air cuts
    *lost* (v3_delta 24.1 overall, F+A 38.7); with the wavelet detector they *win*. The
    reproducible single-window crop — keeping a consistent ~75 % per recording — is what
-   makes the difference (full ours-vs-theirs comparison in [BUGFIXES.md](BUGFIXES.md) §10).
+   makes the difference (full ours-vs-theirs comparison in [BUGFIXES.md](helper_markdowns/BUGFIXES.md) §10).
 4. **LightGBM ≫ Ridge.** Best LGBM 21.1 vs best Ridge 41.9 (barely beating predict-mean).
    Ridge actually *breaks* under the wavelet crop (`ridge_v3_delta` 89.8 µm, F+A 199.8)
    because the crop rescales features and Ridge is scale-sensitive — irrelevant to the
@@ -531,61 +553,92 @@ divided across team members.
 
 ---
 ## 9. How to run stuff
-First of all, make sure you have Snellius working by following the setup steps from [Wiki Snellius - Connecting to the system](https://servicedesk.surf.nl/wiki/spaces/WIKI/pages/30660216/Connecting+to+the+system). In this Wiki, you can also find info on how to write a job script, so please get familiar with this [Wiki Snellius - Writing a job script](https://servicedesk.surf.nl/wiki/spaces/WIKI/pages/30660220/Writing+a+job+script).
+Everything runs as a plain Python script — no cluster or job scheduler required. A
+GPU is strongly recommended for the vision/fusion training (CPU works but is slow);
+the sensor-only and Taylor-fitting steps run fine on CPU.
 
-Once you are in and can use the terminal, you can create a folder in the `/scratch-shared/` folder by navigating to it using the following line:
+### 0. Setup
 ```bash
-cd /scratch-shared/your_username/
+pip install -r requirements.txt
+# Get the dataset (downloads MATWI into dataset/matwi/):
+python dataset/download_data.py
+# Optional: exploratory plots
+python dataset/EDA.py
+```
+Most scripts take `--data-dir`, `--labels-csv`, `--sets-csv` and `--output-dir`; the
+examples below assume the data lives in `dataset/matwi/`. Each training script also
+supports `--list-experiments` (to print the available configs) and `--only <name>`
+(to run a single config), so you can run one experiment per process or loop over them.
+
+### Stage 1 — Vision ablation:
+```bash
+cd vision-only
+python train_vision.py --list-experiments        # see the 9 configs
+for EXP in efficientnetv2_dataset_MSE resnet50_imagenet_L1; do
+  python train_vision.py \
+      --data-dir ../dataset/matwi --labels-csv ../dataset/matwi/labels.csv \
+      --sets-csv ../dataset/matwi/sets.csv --output-dir ../runs/vision_ablation \
+      --only "$EXP" --seed 42 --num-workers 4 --device auto
+done
+python gather_results.py --output-dir ../runs/vision_ablation
 ```
 
-And then creating the folder by doing:
+### Stage 2 — Sensor fusion ablation:
 ```bash
-mkdir name_of_project_folder
+cd vision-sensor
+python train_vision_sensor.py --list-experiments
+python train_vision_sensor.py \
+    --data-dir ../dataset/matwi --labels-csv ../dataset/matwi/labels.csv \
+    --sets-csv ../dataset/matwi/sets.csv --output-dir ../runs/sensor_ablation \
+    --only intermediate_top25 --seed 42 --num-workers 4
+python gather_results.py --output-dir ../runs/sensor_ablation
+# Air-cut comparison: run *_gated configs and compare against their ungated twins.
 ```
 
-Then, inside this folder, make sure to create the structure presented in Section 3. Also, ensure to have the environment setup, for this I would recommend asking Chat and it will explain it better, together with making sure you have all libraries needed installed.
-
- 
-### Vision ablation (already done):
+### Stage 2b — Sensor-only deep dive (LightGBM + Ridge, air-cut filtering):
 ```bash
-cd /scratch-shared/your_username/name_of_project_folder/vision-only/
-mkdir -p /scratch-shared/your_username/name_of_project_folder/runs/vision_ablation/logs
-sbatch run_vision_ablation.sh
-# After jobs finish:
-python gather_results.py --output-dir /scratch-shared/your_username/name_of_project_folder/runs/vision_ablation
-```
- 
-### Sensor fusion (done — now includes 3 air-cut experiments, array 0–12):
-```bash
-cd /scratch-shared/your_username/name_of_project_folder/vision-sensor/
-mkdir -p /scratch-shared/your_username/name_of_project_folder/runs/sensor_ablation/logs
-sbatch run_sensor_ablation.sh
-# After jobs finish:
-python gather_results.py --output-dir /scratch-shared/your_username/name_of_project_folder/runs/sensor_ablation
-# Air-cut comparison: compare intermediate_top25 vs intermediate_top25_gated, etc.
-```
-
-### Sensor-only deep dive (LightGBM + Ridge, air-cut filtering):
-```bash
-cd /scratch-shared/your_username/name_of_project_folder/sensor-only/
-pip install lightgbm   # enables the LightGBM method matrix
+cd sensor-only
+pip install lightgbm   # if not already installed
 python sensor_only_v2.py \
     --data-dir   ../dataset/matwi \
     --labels-csv ../dataset/matwi/labels.csv \
     --output-dir ../runs/sensor_only_v2
 # Features are cached; reruns take seconds. Results in runs/sensor_only_v2/results.csv
 ```
- 
-### Check job status:
+
+### Stage 3 — Taylor physics loss (`pinn*/` variants):
+Pick the variant for what you want to test (see §3.1; `pinnV2` is the canonical one).
+Every variant follows the same two steps — **fit the Taylor constants once**, then
+**train** one or more configs. Example for `pinnV2`:
 ```bash
-squeue -u your_username
+cd pinnV2
+# 1) ONCE — calibrate Taylor's constants (CPU, ~1s) -> taylor_constants.json
+python fit_taylor.py --labels-csv ../dataset/matwi/labels.csv \
+                     --sets-csv   ../dataset/matwi/sets.csv --out ./taylor_constants.json
+# 2) train a config (control = --lambda-max 0.0). Loop over seeds as needed:
+python train_vision_sensor_taylor.py \
+    --data-dir ../dataset/matwi --labels-csv ../dataset/matwi/labels.csv \
+    --sets-csv ../dataset/matwi/sets.csv --constants taylor_constants.json \
+    --output-dir runs/stage3_fusion --base-exp t3_gated_top25_md30 \
+    --lambda-max 0.5 --warmup 2 --one-sided --apply-to all --use-taylor-slope \
+    --epochs 17 --seed 42
+# 3) aggregate (mean±std over seeds, Δ vs control)
+python aggregate_confirm.py runs/stage3_fusion
 ```
- 
+Each folder's `README.md` has the exact commands and a single-config example
+(`pinn_hard` uses `train_vision_hard.py` / `train_vision_sensor_hard.py` +
+`aggregate_hard.py`; the air-cut variants add `--gate-aircuts`).
+
+### Verify the code runs (no GPU or dataset needed):
+```bash
+# Builds a tiny synthetic dataset and exercises the whole pipeline end-to-end
+# (vision + fusion datasets/models, air-cut detector, one train+eval epoch, Taylor loss):
+python tests/smoke_test.py
+```
+
 ### View results:
 ```bash
-# Vision ablation:
-cat /scratch-shared/your_username/name_of_project_folder/runs/vision_ablation/comparison_summary.csv
- 
-# Sensor ablation:
-cat /scratch-shared/your_username/name_of_project_folder/runs/sensor_ablation/comparison_summary.csv
+# Each aggregator writes a comparison_summary.csv next to the runs it scanned:
+cat runs/vision_ablation/comparison_summary.csv
+cat runs/sensor_ablation/comparison_summary.csv
 ```
