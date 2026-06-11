@@ -1,6 +1,13 @@
 import argparse
 import warnings
 from pathlib import Path
+import sys
+
+# Make top-level project modules (dataset, constants, etc.) importable
+# when this script is executed via file path.
+CODE_ROOT = Path(__file__).resolve().parents[2]
+if str(CODE_ROOT) not in sys.path:
+    sys.path.insert(0, str(CODE_ROOT))
 
 from dataset.eda import (
     analyse_cutting_params,

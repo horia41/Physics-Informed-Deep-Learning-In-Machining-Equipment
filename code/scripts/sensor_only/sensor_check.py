@@ -2,6 +2,13 @@ import argparse
 from pathlib import Path
 import numpy as np
 from sklearn.linear_model import Ridge
+import sys
+
+# Make top-level project modules (dataset, constants, etc.) importable
+# when this script is executed via file path.
+CODE_ROOT = Path(__file__).resolve().parents[2]
+if str(CODE_ROOT) not in sys.path:
+    sys.path.insert(0, str(CODE_ROOT))
 
 from dataset.multimodal import MATWIMultimodalDatasetV1
 from dataset.features import extract_features_for_split

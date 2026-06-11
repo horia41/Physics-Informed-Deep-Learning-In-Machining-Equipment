@@ -8,6 +8,13 @@ from typing import Dict, List, Sequence
 
 import numpy as np
 import pandas as pd
+import sys
+
+# Make top-level project modules (dataset, constants, etc.) importable
+# when this script is executed via file path.
+CODE_ROOT = Path(__file__).resolve().parents[2]
+if str(CODE_ROOT) not in sys.path:
+    sys.path.insert(0, str(CODE_ROOT))
 
 from constants.matwi_dataset_constants import (
     PINN_DEFAULT_TRAIN_SETS,

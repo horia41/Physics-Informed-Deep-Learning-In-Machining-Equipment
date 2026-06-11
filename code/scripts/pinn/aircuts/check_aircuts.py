@@ -4,12 +4,27 @@ import argparse
 import importlib.util
 import re
 from pathlib import Path
-
 import numpy as np
 import pandas as pd
+import sys
 
-_HERE = Path(__file__).resolve().parent
+# Make top-level project modules (dataset, constants, etc.) importable
+# when this script is executed via file path.
+CODE_ROOT = Path(__file__).resolve().parents[2]
+if str(CODE_ROOT) not in sys.path:
+    sys.path.insert(0, str(CODE_ROOT))
 
+from constants.matwi_dataset_constants import (
+    WAVELET_BASELINE_N,
+    WAVELET_LEVEL,
+    WAVELET_MIN_ACTIVE,
+    WAVELET_NAME,
+    WAVELET_TRIM,
+    WAVELET_Z_THRESH,
+    SENSOR_CHANNELS
+)
+
+from dataset.features import wavelet_cut_window, extract_sensor_features_v1
 
 def _normalise_sensorfile(s: str) -> str:
     """Replicate DatasetClass._load_and_filter's path rewrite EXACTLY, so this
@@ -20,17 +35,6 @@ def _normalise_sensorfile(s: str) -> str:
     s = re.sub(r"^(Set\d+)[\\/]", r"\1/\1/", s)
     return s
 
-
-def _load_local_dataset_module():
-    """Load THIS folder's DatasetClass so we test the wavelet version, not a sibling."""
-    path = _HERE / "DatasetClass_VisionSensors.py"
-    spec = importlib.util.spec_from_file_location("ds_check", path)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    print(f"[check] using detector from: {path}")
-    return mod
-
-
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--data-dir", required=True, help="dataset/matwi root")
@@ -39,14 +43,9 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
 
-    ds = _load_local_dataset_module()
-
-    # Confirm this is genuinely the wavelet detector, not the v1 envelope one.
-    assert hasattr(ds, "wavelet_cut_window"), \
-        "Loaded DatasetClass has no wavelet_cut_window — this is NOT the v2 wavelet version!"
-    print(f"[check] WAVELET params: name={ds.WAVELET_NAME} level={ds.WAVELET_LEVEL} "
-          f"z_thresh={ds.WAVELET_Z_THRESH} baseline_n={ds.WAVELET_BASELINE_N} "
-          f"min_active={ds.WAVELET_MIN_ACTIVE} trim={ds.WAVELET_TRIM}")
+    print(f"[check] WAVELET params: name={WAVELET_NAME} level={WAVELET_LEVEL} "
+          f"z_thresh={WAVELET_Z_THRESH} baseline_n={WAVELET_BASELINE_N} "
+          f"min_active={WAVELET_MIN_ACTIVE} trim={WAVELET_TRIM}")
 
     data_dir = Path(args.data_dir)
     labels = pd.read_csv(args.labels_csv)
@@ -63,13 +62,13 @@ def main():
         try:
             df = pd.read_csv(sp, header=None, usecols=[0, 1, 2, 3, 4],
                              dtype=np.float32, low_memory=False)
-            df.columns = ds.SENSOR_CHANNELS
+            df.columns = SENSOR_CHANNELS
         except Exception as e:
             print(f"{str(row['SensorFile']):<40}  LOAD FAILED: {e}")
             continue
 
         n = len(df)
-        s, e = ds.wavelet_cut_window(df)
+        s, e = wavelet_cut_window(df)
         kept = e - s
         frac = kept / n if n else 0.0
         aircut_pct = 100.0 * (1 - frac)
@@ -78,8 +77,8 @@ def main():
             fellback += 1
 
         # Do the gated vs ungated feature vectors actually differ?
-        f_off = ds.extract_sensor_features(sp, gate_aircuts=False)
-        f_on = ds.extract_sensor_features(sp, gate_aircuts=True)
+        f_off = extract_sensor_features_v1(sp, gate_aircuts=False)
+        f_on = extract_sensor_features_v1(sp, gate_aircuts=True)
         changed = not np.allclose(f_off, f_on, rtol=1e-4, atol=1e-6)
 
         fracs.append(frac)

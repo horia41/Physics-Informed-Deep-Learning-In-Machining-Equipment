@@ -1,6 +1,13 @@
 import argparse
 from pathlib import Path
+import sys
 import warnings
+
+# Make top-level project modules (dataset, constants, etc.) importable
+# when this script is executed via file path.
+CODE_ROOT = Path(__file__).resolve().parents[2]
+if str(CODE_ROOT) not in sys.path:
+    sys.path.insert(0, str(CODE_ROOT))
 
 from dataset.download import download_file, get_file_list_from_api, extract_zip, build_download_url
 from constants.matwi_dataset_constants import KNOWN_FILES, BASE_URL, PERSISTENT_ID
